@@ -12,6 +12,7 @@ declare -A KEY_LABEL=(
     [prog3]="Camera Blur key     (KEY_PROG3 / XF86Launch3)"
     [fav]="Lenovo Star/Fav key  (KEY_FAVORITES)"
     [help]="Lenovo Support key   (KEY_HELP)"
+    [refresh]="Refresh Rate key   (KEY_REFRESH_RATE_TOGGLE)"
 )
 
 declare -A KEY_KEYSYM=(
@@ -20,6 +21,7 @@ declare -A KEY_KEYSYM=(
     [prog3]="XF86Launch3"
     [fav]="XF86Favorites"     # requires xmodmap entry — handled below
     [help]="Help"
+    [refresh]="XF86Launch5"   # requires xmodmap entry — handled below
 )
 
 # KEY_FAVORITES (evdev 364 → X11 keycode 372) has no keysym by default.
@@ -31,6 +33,19 @@ ensure_favorites_keysym() {
         if ! grep -q "keycode 372" "$xmod" 2>/dev/null; then
             echo "keycode 372 = XF86Favorites" >> "$xmod"
             echo "  → Added keycode 372 = XF86Favorites to ~/.Xmodmap (loaded at login)"
+        fi
+    fi
+}
+
+# KEY_REFRESH_RATE_TOGGLE (evdev 562 → X11 keycode 570) has no keysym by default.
+# We assign XF86Launch5 via xmodmap, persisted in ~/.Xmodmap.
+ensure_refresh_keysym() {
+    if ! xmodmap -pk 2>/dev/null | grep "^570" | grep -q "XF86Launch5"; then
+        xmodmap -e "keycode 570 = XF86Launch5" 2>/dev/null || true
+        local xmod="$HOME/.Xmodmap"
+        if ! grep -q "keycode 570" "$xmod" 2>/dev/null; then
+            echo "keycode 570 = XF86Launch5" >> "$xmod"
+            echo "  → Added keycode 570 = XF86Launch5 to ~/.Xmodmap (loaded at login)"
         fi
     fi
 }
@@ -176,6 +191,42 @@ clear_binding() {
 
 # ── key submenu ───────────────────────────────────────────────────────────────
 
+handle_refresh_key() {
+    ensure_refresh_keysym
+    local ksym="${KEY_KEYSYM[refresh]}"
+    local label="${KEY_LABEL[refresh]}"
+    local default_cmd="$HOME/.local/bin/refresh-rate-toggle"
+
+    while true; do
+        echo ""
+        echo "── $label ──"
+        show_binding "$ksym"
+        echo ""
+        echo "  Actions:"
+        echo "   1) Bind to refresh-rate-toggle (recommended)"
+        echo "   2) Custom command"
+        echo "   3) Show current binding"
+        echo "   4) Clear / remove binding"
+        echo "   0) Back"
+        echo ""
+        read -rp "  Choice: " choice
+        case "$choice" in
+            1)
+                if [ -f "$default_cmd" ]; then
+                    set_binding "$ksym" "Toggle Refresh Rate" "$default_cmd"
+                else
+                    echo "  ⚠  $default_cmd not found — run ./install-tray.sh first"
+                fi
+                ;;
+            2) read -rp "  Enter command: " cmd; [ -n "$cmd" ] && set_binding "$ksym" "Custom" "$cmd" ;;
+            3) show_binding "$ksym" ;;
+            4) clear_binding "$ksym" ;;
+            0) return ;;
+            *) echo "  Invalid choice." ;;
+        esac
+    done
+}
+
 handle_key() {
     local key="$1"
     local ksym="${KEY_KEYSYM[$key]}"
@@ -217,7 +268,7 @@ main() {
     echo "  Keys you can configure:"
     echo ""
     local i=1
-    local keys=(prog1 prog2 prog3 fav help)
+    local keys=(prog1 prog2 prog3 fav help refresh)
     for key in "${keys[@]}"; do
         local ksym="${KEY_KEYSYM[$key]}"
         local current
@@ -241,6 +292,7 @@ main() {
         3) handle_key prog3 ;;
         4) handle_key fav ;;
         5) handle_key help ;;
+        6) handle_refresh_key ;;
         q|Q) echo ""; exit 0 ;;
         *) echo "  Invalid choice." ;;
     esac
