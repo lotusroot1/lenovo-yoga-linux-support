@@ -160,6 +160,24 @@ gsettings set org.cinnamon.desktop.keybindings.media-keys screensaver \
 
 ---
 
+## Refresh rate toggle
+
+The built-in display (eDP-1, SDC 0x4152) runs natively at **2880×1800** with
+Cinnamon fractional scaling (scale=2, logical 1440×900). The EDID advertises
+both 90Hz and 60Hz for the native resolution:
+
+```
+2880x1800     90.00 +  60.00
+```
+
+Switching between rates with `xrandr --output eDP-1 --mode 2880x1800 --rate 60`
+(or `--rate 90`) does not trigger Cinnamon to recalculate display scaling because
+the physical resolution is unchanged. No custom modelines or EDID patches are needed.
+
+`refresh-rate-toggle` handles `KEY_REFRESH_RATE_TOGGLE` (Fn+R) using this approach.
+
+---
+
 ## Remapping
 
 Keys that emit keycodes can be bound via Cinnamon custom shortcuts (gsettings).

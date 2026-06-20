@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# Toggle display refresh rate between high (90Hz) and low (~60Hz).
-#
-# Strategy: keep the exact same resolution when switching rates, so Cinnamon's
-# compositor never sees a geometry change and never recalculates display scaling.
-#
-# For modes not listed at 60Hz in the EDID (e.g. 1920x1200), a CVT modeline is
-# added via xrandr --newmode / --addmode. This is idempotent and safe to run
-# repeatedly; it is a no-op if the mode already exists.
+# Toggle display refresh rate between high and low Hz.
+# Both rates must be available for the current mode in the EDID.
 #
 # Usage: refresh-rate-toggle [--silent]
 #   --silent  skip the desktop notification (used when called from the tray UI)
@@ -15,44 +9,10 @@ set -euo pipefail
 SILENT=0
 for _arg in "$@"; do [ "$_arg" = "--silent" ] && SILENT=1; done
 
-STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/yoga-tray/refresh-rate-state"
 OUTPUT=$(xrandr | awk '/ connected/{print $1; exit}')
-
 CURRENT_LINE=$(xrandr | grep -E '^\s+[0-9]+x[0-9]+.*\*' | head -1)
 CURRENT_MODE=$(echo "$CURRENT_LINE" | awk '{print $1}')
 CURRENT_RATE=$(echo "$CURRENT_LINE" | grep -oP '[\d.]+(?=\*)' | head -1 | cut -d. -f1)
-
-# Return the xrandr mode name to use for 60Hz at the given WxH resolution.
-# Prefers a native EDID 60Hz entry; otherwise adds a CVT custom mode.
-find_or_add_60hz() {
-    local mode="$1"
-    local w h
-    w=$(echo "$mode" | cut -dx -f1)
-    h=$(echo "$mode" | cut -dx -f2)
-
-    # Native EDID 60Hz entry for this resolution?
-    if xrandr | grep -qE "^\s+${w}x${h}\s+.*60\.[0-9]"; then
-        echo "$mode"
-        return 0
-    fi
-
-    # Custom CVT mode already registered?
-    local custom="${mode}_60.00"
-    if xrandr | grep -qE "^\s+${custom}\s"; then
-        echo "$custom"
-        return 0
-    fi
-
-    # Add via CVT modeline
-    local modeline mode_name mode_params
-    modeline=$(cvt "$w" "$h" 60 2>/dev/null | grep -i 'Modeline') || return 1
-    mode_name=$(echo "$modeline" | awk '{print $2}' | tr -d '"')
-    mode_params=$(echo "$modeline" | cut -d' ' -f3-)
-
-    xrandr --newmode "$mode_name" $mode_params 2>/dev/null || true
-    xrandr --addmode "$OUTPUT" "$mode_name" 2>/dev/null || return 1
-    echo "$mode_name"
-}
 
 _notify() {
     [ "$SILENT" = "1" ] && return
@@ -60,19 +20,9 @@ _notify() {
 }
 
 if [ "${CURRENT_RATE:-0}" -ge 85 ]; then
-    LOW_MODE=$(find_or_add_60hz "$CURRENT_MODE") || {
-        _notify "Refresh Rate" "No 60 Hz mode available at ${CURRENT_MODE}"
-        exit 1
-    }
-    mkdir -p "$(dirname "$STATE_FILE")"
-    echo "${CURRENT_MODE}:90" > "$STATE_FILE"
-    xrandr --output "$OUTPUT" --mode "$LOW_MODE" --rate 60
+    xrandr --output "$OUTPUT" --mode "$CURRENT_MODE" --rate 60
     _notify "Refresh Rate" "60 Hz — Power Saver"
 else
-    PREV_MODE="" PREV_RATE=""
-    [ -f "$STATE_FILE" ] && IFS=: read -r PREV_MODE PREV_RATE < "$STATE_FILE" || true
-    PREV_MODE="${PREV_MODE:-2880x1800}"
-    PREV_RATE="${PREV_RATE:-90}"
-    xrandr --output "$OUTPUT" --mode "$PREV_MODE" --rate "$PREV_RATE"
-    _notify "Refresh Rate" "${PREV_RATE} Hz"
+    xrandr --output "$OUTPUT" --mode "$CURRENT_MODE" --rate 90
+    _notify "Refresh Rate" "90 Hz"
 fi
