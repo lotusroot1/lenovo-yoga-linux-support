@@ -2,8 +2,10 @@
 # Toggle display refresh rate between 90Hz and 60Hz.
 #
 # On the Yoga 9i Gen 7, 60Hz is only available at native resolution (2880x1800).
-# This script saves the current mode before switching to 60Hz so it can be
-# restored when toggling back to 90Hz.
+# When the current mode is lower (e.g. 1920x1200), switching to 2880x1800 would
+# normally cause Cinnamon to change display scaling. We apply an xrandr --scale
+# transform so the logical resolution stays the same, and only the refresh rate
+# visibly changes.
 set -euo pipefail
 
 STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/yoga-tray/refresh-rate-state"
@@ -14,15 +16,22 @@ CURRENT_MODE=$(echo "$CURRENT_LINE" | awk '{print $1}')
 CURRENT_RATE=$(echo "$CURRENT_LINE" | grep -oP '[\d.]+(?=\*)' | head -1 | cut -d. -f1)
 
 if [ "${CURRENT_RATE:-0}" -ge 85 ]; then
-    # At 90Hz — save current mode and switch to 60Hz at native resolution.
+    # Going to 60Hz — switch to native resolution with a scale transform so the
+    # logical resolution (and thus display scaling) stays unchanged.
+    CURR_W=$(echo "$CURRENT_MODE" | cut -dx -f1)
+    CURR_H=$(echo "$CURRENT_MODE" | cut -dx -f2)
+    SCALE=$(awk -v cw="$CURR_W" -v ch="$CURR_H" \
+        'BEGIN { printf "%.6fx%.6f", 2880/cw, 1800/ch }')
+
     mkdir -p "$(dirname "$STATE_FILE")"
     echo "${CURRENT_MODE}:90" > "$STATE_FILE"
-    xrandr --output "$OUTPUT" --mode 2880x1800 --rate 60
+
+    xrandr --output "$OUTPUT" --mode 2880x1800 --rate 60 --scale "$SCALE"
     notify-send --urgency=low --expire-time=2000 \
         --icon=video-display-symbolic \
         "Refresh Rate" "60 Hz — Power Saver"
 else
-    # At 60Hz — restore previous mode, or default to native 90Hz.
+    # Restoring to previous mode — reset scale so logical = physical again.
     if [ -f "$STATE_FILE" ]; then
         PREV=$(cat "$STATE_FILE")
         PREV_MODE="${PREV%%:*}"
@@ -31,7 +40,7 @@ else
         PREV_MODE="2880x1800"
         PREV_RATE="90"
     fi
-    xrandr --output "$OUTPUT" --mode "$PREV_MODE" --rate "$PREV_RATE"
+    xrandr --output "$OUTPUT" --mode "$PREV_MODE" --rate "$PREV_RATE" --scale 1x1
     notify-send --urgency=low --expire-time=2000 \
         --icon=video-display-symbolic \
         "Refresh Rate" "${PREV_RATE} Hz"
