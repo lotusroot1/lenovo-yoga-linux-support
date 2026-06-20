@@ -57,6 +57,11 @@ install -m 755 "$SCRIPT_DIR/yoga-tray" "$TRAY_BIN"
 echo "==> Installing refresh-rate-toggle to $(dirname "$TRAY_BIN")/refresh-rate-toggle"
 install -m 755 "$SCRIPT_DIR/../special-keys/refresh-rate-toggle" "$(dirname "$TRAY_BIN")/refresh-rate-toggle"
 
+echo "==> Registering custom 1920x1200@60Hz display mode"
+xrandr --newmode "1920x1200_60.00" 193.25 1920 2056 2256 2592 1200 1203 1209 1245 -hsync +vsync 2>/dev/null || true
+xrandr --addmode eDP-1 "1920x1200_60.00" 2>/dev/null || true
+echo "    1920x1200_60.00 available (re-added automatically by toggle script on each login)"
+
 echo "==> Setting up Fn+R hardware key binding"
 # Assign XF86Launch5 keysym to the KEY_REFRESH_RATE_TOGGLE keycode (evdev 562 → X11 570)
 xmodmap -e "keycode 570 = XF86Launch5" 2>/dev/null || true

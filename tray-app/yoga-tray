@@ -141,7 +141,7 @@ def toggle_refresh_rate():
     if not REFRESH_CMD:
         return False
     try:
-        subprocess.Popen([REFRESH_CMD])
+        subprocess.Popen([REFRESH_CMD, '--silent'])
         return True
     except Exception:
         return False
