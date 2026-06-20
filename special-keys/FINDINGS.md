@@ -36,12 +36,19 @@ Linux Mint. Covers detection, key codes, and remapping.
 
 ### Function-row secondary keys (Fn+Fx)
 
-| Physical label | Linux keycode | Device | Default action |
-|---|---|---|---|
-| Airplane mode | `KEY_RFKILL` (247) | event9 | Kernel handles Wi-Fi toggle |
-| Microphone mute | `KEY_MICMUTE` (248) | event9 | Kernel handles (confirmed in capabilities) |
-| Lock | `Super+L` composite | event3 | *See bug below* |
-| Calculator | `KEY_CALC` (140) | event3 | Opens calculator app |
+| Physical label | Linux keycode | Scan code | Device | Default action |
+|---|---|---|---|---|
+| Airplane mode | `KEY_RFKILL` (247) | 0x0d | event9 | Kernel handles Wi-Fi toggle |
+| Microphone mute | `KEY_F20` (190) | 0x08 | event9 | **None** — does not mute mic on Linux (see note) |
+| Lock | `Super+L` composite | — | event3 | *See bug below* |
+| Calculator | `KEY_CALC` (140) | — | event3 | Opens calculator app |
+| Refresh rate | `KEY_REFRESH_RATE_TOGGLE` (562) | 0x110 | event9 | None |
+
+> **Mic mute note:** The physical mic mute key (F4, or Fn+F4 with Fn Lock on) fires
+> `KEY_F20` — not `KEY_MICMUTE`. `KEY_MICMUTE` (248) appears in the device capability
+> list but never fires with any physical key (phantom entry). `KEY_F20` has no default
+> action on Linux, so the mic mute key does nothing out of the box and requires a custom
+> keybinding to toggle PulseAudio/PipeWire and show a notification.
 
 ### Other special keys
 
@@ -49,6 +56,13 @@ Linux Mint. Covers detection, key codes, and remapping.
 |---|---|---|---|
 | Lenovo Star / Favorite | `KEY_FAVORITES` (364) | 0x101 | *(unmapped in X11 — needs xmodmap)* |
 | Lenovo Support | `KEY_HELP` (138) | 0x7f | `Help` |
+
+### Phantom capability entries (declared by driver, no physical key fires them)
+
+`KEY_MICMUTE` (248), `KEY_PROG4` (203), `KEY_CAMERA` (212), `KEY_SWITCHVIDEOMODE` (227),
+`KEY_F16` (186), `KEY_F22` (192), `KEY_F23` (193), `KEY_TOUCHPAD_TOGGLE` (530),
+`KEY_ROOT_MENU` (618), `KEY_UNKNOWN` (240), `KEY_ESC` (1), `KEY_CUT` (137),
+keycodes 445, 446, 634.
 
 ---
 
