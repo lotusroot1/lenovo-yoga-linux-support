@@ -39,16 +39,16 @@ Linux Mint. Covers detection, key codes, and remapping.
 | Physical label | Linux keycode | Scan code | Device | Default action |
 |---|---|---|---|---|
 | Airplane mode | `KEY_RFKILL` (247) | 0x0d | event9 | Kernel handles Wi-Fi toggle |
-| Microphone mute | `KEY_F20` (190) | 0x08 | event9 | **None** — does not mute mic on Linux (see note) |
+| Microphone mute | `KEY_F20` (190) | 0x08 | event9 | Cinnamon handles — toggles mic mute + OSD (see note) |
 | Lock | `Super+L` composite | — | event3 | *See bug below* |
 | Calculator | `KEY_CALC` (140) | — | event3 | Opens calculator app |
 | Refresh rate | `KEY_REFRESH_RATE_TOGGLE` (562) | 0x110 | event9 | None |
 
 > **Mic mute note:** The physical mic mute key (F4, or Fn+F4 with Fn Lock on) fires
 > `KEY_F20` — not `KEY_MICMUTE`. `KEY_MICMUTE` (248) appears in the device capability
-> list but never fires with any physical key (phantom entry). `KEY_F20` has no default
-> action on Linux, so the mic mute key does nothing out of the box and requires a custom
-> keybinding to toggle PulseAudio/PipeWire and show a notification.
+> list but never fires with any physical key (phantom entry). On Linux Mint Cinnamon,
+> `KEY_F20` is handled by the desktop environment — it toggles the microphone mute in
+> PulseAudio/PipeWire and shows an OSD notification automatically. No custom setup needed.
 
 ### Other special keys
 
