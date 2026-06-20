@@ -162,11 +162,11 @@ def _gs_find_slot(ksym):
     try:
         out = subprocess.check_output(
             ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
-            text=True, timeout=3,
+            text=True, timeout=3, stderr=subprocess.DEVNULL,
         )
         for slot in _parse_gs_list(out):
             path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
-            schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+            schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
             b = subprocess.check_output(
                 ['gsettings', 'get', schema, 'binding'], text=True, timeout=3,
             ).strip()
@@ -181,7 +181,7 @@ def _gs_next_slot():
     try:
         out = subprocess.check_output(
             ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
-            text=True, timeout=3,
+            text=True, timeout=3, stderr=subprocess.DEVNULL,
         )
         existing = set(_parse_gs_list(out))
         i = 0
@@ -198,7 +198,7 @@ def _gs_get_binding(ksym):
         return None, None
     try:
         path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
-        schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+        schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
         name = subprocess.check_output(
             ['gsettings', 'get', schema, 'name'], text=True, timeout=3,
         ).strip().strip("'")
@@ -227,7 +227,7 @@ def _gs_set_binding(ksym, name, command):
                 timeout=3, check=False,
             )
         path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
-        schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+        schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
         subprocess.run(['gsettings', 'set', schema, 'name',    name],          timeout=3, check=False)
         subprocess.run(['gsettings', 'set', schema, 'command', command],       timeout=3, check=False)
         subprocess.run(['gsettings', 'set', schema, 'binding', f"['{ksym}']"], timeout=3, check=False)
@@ -241,11 +241,11 @@ def _gs_clear_binding(ksym):
         if not slot:
             return
         path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
-        schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+        schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
         subprocess.run(['gsettings', 'set', schema, 'binding', '[]'], timeout=3, check=False)
         out = subprocess.check_output(
             ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
-            text=True, timeout=3,
+            text=True, timeout=3, stderr=subprocess.DEVNULL,
         )
         remaining = [s for s in _parse_gs_list(out) if s != slot]
         new_list = "['" + "', '".join(remaining) + "']" if remaining else '[]'

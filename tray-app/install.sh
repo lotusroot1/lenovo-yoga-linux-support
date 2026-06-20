@@ -68,12 +68,12 @@ echo "    Keycode 570 = XF86Launch5 (active now + persisted to ~/.Xmodmap)"
 # Wire XF86Launch5 → refresh-rate-toggle via Cinnamon custom keybinding
 _KSYM="XF86Launch5"
 _REFRESH_BIN="$(dirname "$TRAY_BIN")/refresh-rate-toggle"
-_RAW_LIST=$(gsettings get org.cinnamon.desktop.keybindings custom-list 2>/dev/null | tr -d "@as ")
+_RAW_LIST=$(gsettings get org.cinnamon.desktop.keybindings custom-list 2>/dev/null | sed 's/^@as //')
 _SLOT=""
 for _s in $(echo "$_RAW_LIST" | tr -d "[]'" | tr ',' '\n'); do
     [ -z "$_s" ] && continue
     _p="/org/cinnamon/desktop/keybindings/custom-keybindings/$_s/"
-    if gsettings get "org.cinnamon.desktop.keybindings.custom-keybindings:$_p" binding 2>/dev/null \
+    if gsettings get "org.cinnamon.desktop.keybindings.custom-keybinding:$_p" binding 2>/dev/null \
             | grep -q "$_KSYM"; then
         _SLOT="$_s"
         break
@@ -92,10 +92,10 @@ if [ -z "$_SLOT" ]; then
     fi
 fi
 _p="/org/cinnamon/desktop/keybindings/custom-keybindings/$_SLOT/"
-_sc="org.cinnamon.desktop.keybindings.custom-keybindings:$_p"
-gsettings set "$_sc" name    "Toggle Refresh Rate"
-gsettings set "$_sc" command "$_REFRESH_BIN"
-gsettings set "$_sc" binding "['$_KSYM']"
+_sc="org.cinnamon.desktop.keybindings.custom-keybinding:$_p"
+gsettings set "$_sc" name    "Toggle Refresh Rate"  || true
+gsettings set "$_sc" command "$_REFRESH_BIN"         || true
+gsettings set "$_sc" binding "['$_KSYM']"            || true
 echo "    Bound $_KSYM → $_REFRESH_BIN (Cinnamon slot: $_SLOT)"
 
 mkdir -p "$(dirname "$TRAY_DESKTOP")"

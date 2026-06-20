@@ -107,7 +107,7 @@ find_slot_for_keysym() {
         [ -z "$slot" ] && continue
         local path="/org/cinnamon/desktop/keybindings/custom-keybindings/$slot/"
         local binding
-        binding=$(gsettings get "org.cinnamon.desktop.keybindings.custom-keybindings:$path" binding 2>/dev/null)
+        binding=$(gsettings get "org.cinnamon.desktop.keybindings.custom-keybinding:$path" binding 2>/dev/null)
         if echo "$binding" | grep -q "$ksym"; then
             echo "$slot"
             return
@@ -140,8 +140,8 @@ show_binding() {
     else
         local path="/org/cinnamon/desktop/keybindings/custom-keybindings/$slot/"
         local name cmd
-        name=$(gsettings get "org.cinnamon.desktop.keybindings.custom-keybindings:$path" name 2>/dev/null | tr -d "'")
-        cmd=$(gsettings get  "org.cinnamon.desktop.keybindings.custom-keybindings:$path" command 2>/dev/null | tr -d "'")
+        name=$(gsettings get "org.cinnamon.desktop.keybindings.custom-keybinding:$path" name 2>/dev/null | tr -d "'")
+        cmd=$(gsettings get  "org.cinnamon.desktop.keybindings.custom-keybinding:$path" command 2>/dev/null | tr -d "'")
         echo "  Bound [$slot]: \"$name\" → $cmd"
     fi
 }
@@ -154,7 +154,7 @@ set_binding() {
         slot=$(next_free_slot)
         # Add to list
         local current
-        current=$(gsettings get org.cinnamon.desktop.keybindings custom-list 2>/dev/null | tr -d "@as")
+        current=$(gsettings get org.cinnamon.desktop.keybindings custom-list 2>/dev/null | sed 's/^@as //')
         # Remove empty array markers and rebuild
         local new_list
         if [ "$current" = "[]" ] || [ -z "$(echo "$current" | tr -d "[]' ")" ]; then
@@ -165,9 +165,9 @@ set_binding() {
         gsettings set org.cinnamon.desktop.keybindings custom-list "$new_list"
     fi
     local path="/org/cinnamon/desktop/keybindings/custom-keybindings/$slot/"
-    gsettings set "org.cinnamon.desktop.keybindings.custom-keybindings:$path" name "$label"
-    gsettings set "org.cinnamon.desktop.keybindings.custom-keybindings:$path" command "$cmd"
-    gsettings set "org.cinnamon.desktop.keybindings.custom-keybindings:$path" binding "['$ksym']"
+    gsettings set "org.cinnamon.desktop.keybindings.custom-keybinding:$path" name "$label"
+    gsettings set "org.cinnamon.desktop.keybindings.custom-keybinding:$path" command "$cmd"
+    gsettings set "org.cinnamon.desktop.keybindings.custom-keybinding:$path" binding "['$ksym']"
     echo "  → Bound $ksym to: $cmd"
 }
 
@@ -180,7 +180,7 @@ clear_binding() {
         return
     fi
     local path="/org/cinnamon/desktop/keybindings/custom-keybindings/$slot/"
-    gsettings set "org.cinnamon.desktop.keybindings.custom-keybindings:$path" binding "[]"
+    gsettings set "org.cinnamon.desktop.keybindings.custom-keybinding:$path" binding "[]"
     # Remove from list
     local current new_list
     current=$(gsettings get org.cinnamon.desktop.keybindings custom-list 2>/dev/null)
@@ -276,7 +276,7 @@ main() {
         local status="not bound"
         if [ -n "$current" ]; then
             local p="/org/cinnamon/desktop/keybindings/custom-keybindings/$current/"
-            status=$(gsettings get "org.cinnamon.desktop.keybindings.custom-keybindings:$p" name 2>/dev/null | tr -d "'" || echo "bound")
+            status=$(gsettings get "org.cinnamon.desktop.keybindings.custom-keybinding:$p" name 2>/dev/null | tr -d "'" || echo "bound")
         fi
         printf "   %d) %-50s [%s]\n" "$i" "${KEY_LABEL[$key]}" "$status"
         ((i++))
