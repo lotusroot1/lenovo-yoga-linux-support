@@ -57,6 +57,47 @@ install -m 755 "$SCRIPT_DIR/yoga-tray" "$TRAY_BIN"
 echo "==> Installing refresh-rate-toggle to $(dirname "$TRAY_BIN")/refresh-rate-toggle"
 install -m 755 "$SCRIPT_DIR/../special-keys/refresh-rate-toggle" "$(dirname "$TRAY_BIN")/refresh-rate-toggle"
 
+echo "==> Setting up Fn+R hardware key binding"
+# Assign XF86Launch5 keysym to the KEY_REFRESH_RATE_TOGGLE keycode (evdev 562 → X11 570)
+xmodmap -e "keycode 570 = XF86Launch5" 2>/dev/null || true
+if ! grep -q "keycode 570" "$HOME/.Xmodmap" 2>/dev/null; then
+    echo "keycode 570 = XF86Launch5" >> "$HOME/.Xmodmap"
+fi
+echo "    Keycode 570 = XF86Launch5 (active now + persisted to ~/.Xmodmap)"
+
+# Wire XF86Launch5 → refresh-rate-toggle via Cinnamon custom keybinding
+_KSYM="XF86Launch5"
+_REFRESH_BIN="$(dirname "$TRAY_BIN")/refresh-rate-toggle"
+_RAW_LIST=$(gsettings get org.cinnamon.desktop.keybindings custom-list 2>/dev/null | tr -d "@as ")
+_SLOT=""
+for _s in $(echo "$_RAW_LIST" | tr -d "[]'" | tr ',' '\n'); do
+    [ -z "$_s" ] && continue
+    _p="/org/cinnamon/desktop/keybindings/custom-keybindings/$_s/"
+    if gsettings get "org.cinnamon.desktop.keybindings.custom-keybindings:$_p" binding 2>/dev/null \
+            | grep -q "$_KSYM"; then
+        _SLOT="$_s"
+        break
+    fi
+done
+if [ -z "$_SLOT" ]; then
+    _i=0
+    _EXISTING=$(echo "$_RAW_LIST" | tr -d "[]'" | tr ',' '\n')
+    while echo "$_EXISTING" | grep -qx "custom$_i"; do ((_i++)); done
+    _SLOT="custom$_i"
+    if [ "$_RAW_LIST" = "[]" ] || [ -z "$(echo "$_RAW_LIST" | tr -d "[]' ")" ]; then
+        gsettings set org.cinnamon.desktop.keybindings custom-list "['$_SLOT']"
+    else
+        gsettings set org.cinnamon.desktop.keybindings custom-list \
+            "$(echo "$_RAW_LIST" | sed "s/]$/, '$_SLOT']/")"
+    fi
+fi
+_p="/org/cinnamon/desktop/keybindings/custom-keybindings/$_SLOT/"
+_sc="org.cinnamon.desktop.keybindings.custom-keybindings:$_p"
+gsettings set "$_sc" name    "Toggle Refresh Rate"
+gsettings set "$_sc" command "$_REFRESH_BIN"
+gsettings set "$_sc" binding "['$_KSYM']"
+echo "    Bound $_KSYM → $_REFRESH_BIN (Cinnamon slot: $_SLOT)"
+
 mkdir -p "$(dirname "$TRAY_DESKTOP")"
 echo "==> Adding autostart entry ($TRAY_DESKTOP)"
 cat > "$TRAY_DESKTOP" <<EOF

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-yoga-tray  v1.1
+yoga-tray  v1.2
 Combined system tray app for the Lenovo Yoga 9i Gen 7.
 
 Right-click the tray icon to control:
   - Keyboard backlight  (off / dim / on / auto)
   - Performance profile (Power Saver / Balanced / Performance)
   - Refresh rate        (90 Hz / 60 Hz)
+  - Key Bindings        (bind any Yoga special key to a preset or custom command)
 
 The icon reflects the current performance profile and updates automatically
 when the hardware performance key cycles the profile.
@@ -65,6 +66,30 @@ PROFILE_ICON_CANDIDATES = {
 
 DEFAULT_ICON = 'input-keyboard'
 
+# ── key binding configuration ─────────────────────────────────────────────────
+
+BINDABLE_KEYS = [
+    # (id, menu_label, keysym, xmodmap_keycode_or_None, xmodmap_keysym_name_or_None)
+    ('prog1',   'Dark Mode',     'XF86Launch1',   None, None),
+    ('prog2',   'Audio Profile', 'XF86Launch2',   None, None),
+    ('prog3',   'Camera Blur',   'XF86Launch3',   None, None),
+    ('fav',     'Lenovo Star',   'XF86Favorites',  372, 'XF86Favorites'),
+    ('refresh', 'Refresh Rate',  'XF86Launch5',    570, 'XF86Launch5'),
+]
+
+PRESET_ACTIONS = [
+    ('Toggle dark/light theme',
+     'bash -c \'t=$(gsettings get org.cinnamon.desktop.interface gtk-theme);'
+     ' if echo "$t"|grep -qi dark;'
+     ' then gsettings set org.cinnamon.desktop.interface gtk-theme "Mint-Y";'
+     ' else gsettings set org.cinnamon.desktop.interface gtk-theme "Mint-Y-Dark"; fi\''),
+    ('Full screenshot',      'gnome-screenshot'),
+    ('Area screenshot',      'gnome-screenshot --area'),
+    ('Open file manager',    'nemo'),
+    ('Open terminal',        'x-terminal-emulator'),
+    ('Toggle refresh rate',  os.path.expanduser('~/.local/bin/refresh-rate-toggle')),
+]
+
 # ── paths ─────────────────────────────────────────────────────────────────────
 
 TRAY_DESKTOP = os.path.expanduser('~/.config/autostart/yoga-tray.desktop')
@@ -120,6 +145,133 @@ def toggle_refresh_rate():
         return True
     except Exception:
         return False
+
+
+# ── gsettings / xmodmap key binding helpers ───────────────────────────────────
+
+def _parse_gs_list(raw):
+    raw = raw.strip()
+    if raw.startswith('@as'):
+        raw = raw[3:].strip()
+    if raw in ('[]', ''):
+        return []
+    return [p.strip().strip("'\"") for p in raw.strip('[]').split(',') if p.strip().strip("'\"")]
+
+
+def _gs_find_slot(ksym):
+    try:
+        out = subprocess.check_output(
+            ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
+            text=True, timeout=3,
+        )
+        for slot in _parse_gs_list(out):
+            path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+            schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+            b = subprocess.check_output(
+                ['gsettings', 'get', schema, 'binding'], text=True, timeout=3,
+            ).strip()
+            if ksym in b:
+                return slot
+    except Exception:
+        pass
+    return None
+
+
+def _gs_next_slot():
+    try:
+        out = subprocess.check_output(
+            ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
+            text=True, timeout=3,
+        )
+        existing = set(_parse_gs_list(out))
+        i = 0
+        while f'custom{i}' in existing:
+            i += 1
+        return f'custom{i}'
+    except Exception:
+        return 'custom0'
+
+
+def _gs_get_binding(ksym):
+    slot = _gs_find_slot(ksym)
+    if not slot:
+        return None, None
+    try:
+        path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+        schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+        name = subprocess.check_output(
+            ['gsettings', 'get', schema, 'name'], text=True, timeout=3,
+        ).strip().strip("'")
+        cmd = subprocess.check_output(
+            ['gsettings', 'get', schema, 'command'], text=True, timeout=3,
+        ).strip().strip("'")
+        return name, cmd
+    except Exception:
+        return None, None
+
+
+def _gs_set_binding(ksym, name, command):
+    try:
+        slot = _gs_find_slot(ksym)
+        if not slot:
+            slot = _gs_next_slot()
+            out = subprocess.check_output(
+                ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
+                text=True, timeout=3,
+            )
+            existing = _parse_gs_list(out)
+            existing.append(slot)
+            new_list = "['" + "', '".join(existing) + "']"
+            subprocess.run(
+                ['gsettings', 'set', 'org.cinnamon.desktop.keybindings', 'custom-list', new_list],
+                timeout=3, check=False,
+            )
+        path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+        schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+        subprocess.run(['gsettings', 'set', schema, 'name',    name],          timeout=3, check=False)
+        subprocess.run(['gsettings', 'set', schema, 'command', command],       timeout=3, check=False)
+        subprocess.run(['gsettings', 'set', schema, 'binding', f"['{ksym}']"], timeout=3, check=False)
+    except Exception:
+        pass
+
+
+def _gs_clear_binding(ksym):
+    try:
+        slot = _gs_find_slot(ksym)
+        if not slot:
+            return
+        path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+        schema = f'org.cinnamon.desktop.keybindings.custom-keybindings:{path}'
+        subprocess.run(['gsettings', 'set', schema, 'binding', '[]'], timeout=3, check=False)
+        out = subprocess.check_output(
+            ['gsettings', 'get', 'org.cinnamon.desktop.keybindings', 'custom-list'],
+            text=True, timeout=3,
+        )
+        remaining = [s for s in _parse_gs_list(out) if s != slot]
+        new_list = "['" + "', '".join(remaining) + "']" if remaining else '[]'
+        subprocess.run(
+            ['gsettings', 'set', 'org.cinnamon.desktop.keybindings', 'custom-list', new_list],
+            timeout=3, check=False,
+        )
+    except Exception:
+        pass
+
+
+def _ensure_xmodmap(keycode, keysym_name):
+    try:
+        subprocess.run(['xmodmap', '-e', f'keycode {keycode} = {keysym_name}'], timeout=3, check=False)
+        xmod = os.path.expanduser('~/.Xmodmap')
+        entry = f'keycode {keycode} = {keysym_name}'
+        try:
+            with open(xmod) as f:
+                if entry in f.read():
+                    return
+        except FileNotFoundError:
+            pass
+        with open(xmod, 'a') as f:
+            f.write(entry + '\n')
+    except Exception:
+        pass
 
 
 def _sudo_run(cmd, *args):
@@ -226,6 +378,8 @@ class YogaTray:
 
         self._rr_updating      = False
         self._last_rate        = None
+
+        self.kb_menu_items     = {}
 
         self._profile_icons = self._resolve_profile_icons()
 
@@ -367,6 +521,18 @@ class YogaTray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
+        # ── key bindings section ──────────────────────────────────────────────
+        kb_header = Gtk.MenuItem(label='  Key Bindings')
+        kb_header.set_sensitive(False)
+        self.menu.append(kb_header)
+
+        for key_id, display_label, *_ in BINDABLE_KEYS:
+            item = Gtk.MenuItem(label=f'{display_label}  […]')
+            self.menu.append(item)
+            self.kb_menu_items[key_id] = item
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
         # ── preferences ───────────────────────────────────────────────────────
         self.notif_item = Gtk.CheckMenuItem(label='Notifications')
         self.notif_item.set_active(load_pref('notifications', 'true') == 'true')
@@ -392,6 +558,7 @@ class YogaTray:
         self.refresh_backlight()
         self.refresh_profile()
         self.refresh_refresh_rate()
+        self._rebuild_key_binding_submenus()
 
     # ── backlight callbacks ───────────────────────────────────────────────────
 
@@ -555,6 +722,106 @@ class YogaTray:
             self._rr_updating = True
             self.rr_radio[rate].set_active(True)
             self._rr_updating = False
+
+    # ── key bindings ──────────────────────────────────────────────────────────
+
+    def _rebuild_key_binding_submenus(self):
+        for key_id, display_label, ksym, xmodmap_keycode, xmodmap_name in BINDABLE_KEYS:
+            item = self.kb_menu_items.get(key_id)
+            if not item:
+                continue
+            name, _ = _gs_get_binding(ksym)
+            status = name if name else 'not bound'
+            item.set_label(f'{display_label}  [{status}]')
+            item.set_submenu(self._build_key_submenu(ksym, xmodmap_keycode, xmodmap_name))
+
+    def _build_key_submenu(self, ksym, xmodmap_keycode, xmodmap_name):
+        submenu = Gtk.Menu()
+
+        name, _ = _gs_get_binding(ksym)
+        header = Gtk.MenuItem(label=f'Bound: {name}' if name else 'Not bound')
+        header.set_sensitive(False)
+        submenu.append(header)
+        submenu.append(Gtk.SeparatorMenuItem())
+
+        for action_label, action_cmd in PRESET_ACTIONS:
+            mi = Gtk.MenuItem(label=action_label)
+            mi.connect('activate', self._on_bind_preset,
+                       ksym, action_label, action_cmd, xmodmap_keycode, xmodmap_name)
+            submenu.append(mi)
+
+        submenu.append(Gtk.SeparatorMenuItem())
+
+        enter_mi = Gtk.MenuItem(label='Enter command…')
+        enter_mi.connect('activate', self._on_bind_custom, ksym, xmodmap_keycode, xmodmap_name)
+        submenu.append(enter_mi)
+
+        browse_mi = Gtk.MenuItem(label='Browse for executable…')
+        browse_mi.connect('activate', self._on_bind_browse, ksym, xmodmap_keycode, xmodmap_name)
+        submenu.append(browse_mi)
+
+        submenu.append(Gtk.SeparatorMenuItem())
+
+        clear_mi = Gtk.MenuItem(label='Clear binding')
+        clear_mi.connect('activate', self._on_clear_binding, ksym)
+        submenu.append(clear_mi)
+
+        submenu.show_all()
+        return submenu
+
+    def _on_bind_preset(self, widget, ksym, name, cmd, xmodmap_keycode, xmodmap_name):
+        if xmodmap_keycode:
+            _ensure_xmodmap(xmodmap_keycode, xmodmap_name)
+        _gs_set_binding(ksym, name, cmd)
+
+    def _on_bind_custom(self, widget, ksym, xmodmap_keycode, xmodmap_name):
+        dialog = Gtk.Dialog(title='Key Binding — Enter Command', flags=0)
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                           Gtk.STOCK_OK,     Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(12)
+        content.set_margin_bottom(4)
+        lbl = Gtk.Label(label='Command to run when key is pressed:')
+        lbl.set_xalign(0)
+        content.add(lbl)
+        entry = Gtk.Entry()
+        entry.set_width_chars(60)
+        _, current_cmd = _gs_get_binding(ksym)
+        if current_cmd:
+            entry.set_text(current_cmd)
+        entry.connect('activate', lambda _: dialog.response(Gtk.ResponseType.OK))
+        content.add(entry)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            cmd = entry.get_text().strip()
+            if cmd:
+                if xmodmap_keycode:
+                    _ensure_xmodmap(xmodmap_keycode, xmodmap_name)
+                _gs_set_binding(ksym, cmd, cmd)
+        dialog.destroy()
+
+    def _on_bind_browse(self, widget, ksym, xmodmap_keycode, xmodmap_name):
+        dialog = Gtk.FileChooserDialog(
+            title='Key Binding — Choose Executable',
+            parent=None,
+            action=Gtk.FileChooserAction.OPEN,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                     Gtk.STOCK_OPEN,   Gtk.ResponseType.OK),
+        )
+        dialog.set_current_folder(os.path.expanduser('~/.local/bin'))
+        if dialog.run() == Gtk.ResponseType.OK:
+            path = dialog.get_filename()
+            if path:
+                if xmodmap_keycode:
+                    _ensure_xmodmap(xmodmap_keycode, xmodmap_name)
+                _gs_set_binding(ksym, os.path.basename(path), path)
+        dialog.destroy()
+
+    def _on_clear_binding(self, widget, ksym):
+        _gs_clear_binding(ksym)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
