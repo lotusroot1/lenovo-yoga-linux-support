@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Backend for platform-profile-tray. Run as root via sudoers NOPASSWD.
+# Reading is done directly from sysfs by the tray app; this script only
+# handles writes (which require root).
+set -euo pipefail
+
+SYSFS=/sys/firmware/acpi/platform_profile
+
+case "${1:-}" in
+    get)
+        cat "$SYSFS"
+        ;;
+    set)
+        profile="${2:-}"
+        [ -n "$profile" ] || { echo "Usage: platform-profile set <profile>" >&2; exit 1; }
+        echo "$profile" > "$SYSFS"
+        ;;
+    choices)
+        cat /sys/firmware/acpi/platform_profile_choices
+        ;;
+    *)
+        echo "Usage: platform-profile get|set <profile>|choices" >&2
+        exit 1
+        ;;
+esac
