@@ -5,12 +5,16 @@ set -euo pipefail
 TRAY_BIN="$HOME/.local/bin/yoga-tray"
 TRAY_DESKTOP="$HOME/.config/autostart/yoga-tray.desktop"
 TRAY_APPENTRY="$HOME/.local/share/applications/yoga-tray.desktop"
+REFRESH_BIN="$HOME/.local/bin/refresh-rate-toggle"
 
 echo "==> Killing any running instance"
 pkill -f yoga-tray 2>/dev/null || true
 
 echo "==> Removing tray app"
 rm -f "$TRAY_BIN"
+
+echo "==> Removing refresh-rate-toggle"
+rm -f "$REFRESH_BIN"
 
 echo "==> Removing autostart entry"
 rm -f "$TRAY_DESKTOP"

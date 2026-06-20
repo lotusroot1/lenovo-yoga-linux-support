@@ -54,6 +54,9 @@ mkdir -p "$(dirname "$TRAY_BIN")"
 echo "==> Installing tray app to $TRAY_BIN"
 install -m 755 "$SCRIPT_DIR/yoga-tray" "$TRAY_BIN"
 
+echo "==> Installing refresh-rate-toggle to $(dirname "$TRAY_BIN")/refresh-rate-toggle"
+install -m 755 "$SCRIPT_DIR/../special-keys/refresh-rate-toggle" "$(dirname "$TRAY_BIN")/refresh-rate-toggle"
+
 mkdir -p "$(dirname "$TRAY_DESKTOP")"
 echo "==> Adding autostart entry ($TRAY_DESKTOP)"
 cat > "$TRAY_DESKTOP" <<EOF

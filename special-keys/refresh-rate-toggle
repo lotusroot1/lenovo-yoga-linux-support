@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Toggle display refresh rate between 90Hz and 60Hz.
+#
+# On the Yoga 9i Gen 7, 60Hz is only available at native resolution (2880x1800).
+# This script saves the current mode before switching to 60Hz so it can be
+# restored when toggling back to 90Hz.
+set -euo pipefail
+
+STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/yoga-tray/refresh-rate-state"
+OUTPUT=$(xrandr | awk '/ connected/{print $1; exit}')
+
+CURRENT_LINE=$(xrandr | grep -E '^\s+[0-9]+x[0-9]+.*\*' | head -1)
+CURRENT_MODE=$(echo "$CURRENT_LINE" | awk '{print $1}')
+CURRENT_RATE=$(echo "$CURRENT_LINE" | grep -oP '[\d.]+(?=\*)' | head -1 | cut -d. -f1)
+
+if [ "${CURRENT_RATE:-0}" -ge 85 ]; then
+    # At 90Hz — save current mode and switch to 60Hz at native resolution.
+    mkdir -p "$(dirname "$STATE_FILE")"
+    echo "${CURRENT_MODE}:90" > "$STATE_FILE"
+    xrandr --output "$OUTPUT" --mode 2880x1800 --rate 60
+    notify-send --urgency=low --expire-time=2000 \
+        --icon=video-display-symbolic \
+        "Refresh Rate" "60 Hz — Power Saver"
+else
+    # At 60Hz — restore previous mode, or default to native 90Hz.
+    if [ -f "$STATE_FILE" ]; then
+        PREV=$(cat "$STATE_FILE")
+        PREV_MODE="${PREV%%:*}"
+        PREV_RATE="${PREV##*:}"
+    else
+        PREV_MODE="2880x1800"
+        PREV_RATE="90"
+    fi
+    xrandr --output "$OUTPUT" --mode "$PREV_MODE" --rate "$PREV_RATE"
+    notify-send --urgency=low --expire-time=2000 \
+        --icon=video-display-symbolic \
+        "Refresh Rate" "${PREV_RATE} Hz"
+fi
