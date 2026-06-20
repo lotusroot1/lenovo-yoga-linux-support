@@ -34,7 +34,7 @@ BACKLIGHT_STATES = [
 ]
 
 SYSFS_BRIGHTNESS = '/sys/class/leds/platform::kbd_backlight/brightness'
-BACKLIGHT_POLL_MS = 1000
+BACKLIGHT_POLL_MS = 500
 
 BACKLIGHT_DEBOUNCE_MS = 1500
 
@@ -49,7 +49,7 @@ PROFILES = [
 PROFILE_LABELS = {k: v for k, v in PROFILES}
 
 SYSFS_PROFILE = '/sys/firmware/acpi/platform_profile'
-PROFILE_POLL_MS = 2000
+PROFILE_POLL_MS = 500
 
 PROFILE_DEBOUNCE_MS = 1500
 
