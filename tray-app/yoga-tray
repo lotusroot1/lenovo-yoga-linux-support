@@ -86,7 +86,7 @@ PRESET_ACTIONS = [
     ('Full screenshot',      'gnome-screenshot'),
     ('Area screenshot',      'gnome-screenshot --area'),
     ('Open file manager',    'nemo'),
-    ('Open terminal',        'x-terminal-emulator'),
+    ('Open terminal',        'gnome-terminal'),
     ('Toggle refresh rate',  os.path.expanduser('~/.local/bin/refresh-rate-toggle')),
 ]
 
@@ -405,6 +405,10 @@ class YogaTray:
         GLib.timeout_add(BACKLIGHT_POLL_MS,          self._check_sysfs_brightness)
         GLib.timeout_add(PROFILE_POLL_MS,            self._poll_profile)
         GLib.timeout_add_seconds(REFRESH_RATE_POLL_S, self._poll_refresh_rate)
+
+        xmodmap_file = os.path.expanduser('~/.Xmodmap')
+        if os.path.exists(xmodmap_file):
+            subprocess.Popen(['xmodmap', xmodmap_file])
 
     # ── icon ──────────────────────────────────────────────────────────────────
 
