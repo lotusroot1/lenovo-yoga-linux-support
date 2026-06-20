@@ -10,7 +10,7 @@ present=()
 absent=()
 
 for path in "$KBD_BIN" "$SERVICE_FILE" "$MODULES_CONF" "$SUDOERS_FILE" \
-            "$SLEEP_HOOK" "$TRAY_BIN" "$TRAY_DESKTOP"; do
+            "$SLEEP_HOOK"; do
     if [ -e "$path" ]; then
         present+=("$path")
     else
@@ -31,13 +31,6 @@ if [ "${#absent[@]}" -gt 0 ]; then
     for a in "${absent[@]}"; do echo "      $a"; done
 fi
 echo ""
-
-# ── tray app (user-level) ─────────────────────────────────────────────────────
-if [ -f "$TRAY_BIN" ] || [ -f "$TRAY_DESKTOP" ]; then
-    echo "==> Removing tray app"
-    pkill -f kbd-backlight-tray 2>/dev/null || true
-    rm -f "$TRAY_BIN" "$TRAY_DESKTOP"
-fi
 
 # ── system install ────────────────────────────────────────────────────────────
 echo "==> Stopping and disabling kbd-backlight service"
