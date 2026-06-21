@@ -1,33 +1,38 @@
 #!/usr/bin/env python3
 """
-yoga-tray  v1.2
+yoga-tray  v2.0
 Combined system tray app for the Lenovo Yoga 9i Gen 7.
 
-Right-click the tray icon to control:
-  - Keyboard backlight  (off / dim / on / auto)
-  - Performance profile (Power Saver / Balanced / Performance)
-  - Refresh rate        (90 Hz / 60 Hz)
-  - Key Bindings        (bind any Yoga special key to a preset or custom command)
+Each menu section is a TraySection subclass that implements:
+  read_state()          → current state from hardware/disk
+  update_display(state) → update all widgets for that state
+  build_menu_items()    → list of Gtk widgets for this section
 
-The icon reflects the current performance profile and updates automatically
-when the hardware performance key cycles the profile.
+The base class provides for free:
+  - Periodic polling (set poll_interval_ms)
+  - Change detection (no spurious redraws or notifications)
+  - Debounced desktop notifications
+  - Immediate UI update on user action (apply_change)
+  - State refresh on every menu open
 
 Requires: python3-gi
-Optional: gir1.2-appindicator3-0.1 (better Cinnamon/Ubuntu tray integration)
-          gir1.2-notify-0.7       (desktop notifications on state changes)
+Optional: gir1.2-appindicator3-0.1, gir1.2-notify-0.7
 """
 
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib
 
-import subprocess
+import shlex
 import shutil
+import struct
+import subprocess
 import sys
 import os
 import re
+import threading
 
-# ── backlight ─────────────────────────────────────────────────────────────────
+# ── constants ─────────────────────────────────────────────────────────────────
 
 BACKLIGHT_STATES = [
     ('auto', 'Auto  (ambient light sensor)'),
@@ -37,26 +42,13 @@ BACKLIGHT_STATES = [
 ]
 
 SYSFS_BRIGHTNESS = '/sys/class/leds/platform::kbd_backlight/brightness'
-BACKLIGHT_POLL_MS = 500
-
-BACKLIGHT_DEBOUNCE_MS = 1500
-
-# ── performance profile ───────────────────────────────────────────────────────
 
 PROFILES = [
     ('low-power',   'Power Saver'),
     ('balanced',    'Balanced'),
     ('performance', 'Performance'),
 ]
-
 PROFILE_LABELS = {k: v for k, v in PROFILES}
-
-SYSFS_PROFILE = '/sys/firmware/acpi/platform_profile'
-PROFILE_POLL_MS = 500
-
-PROFILE_DEBOUNCE_MS = 1500
-
-REFRESH_RATE_POLL_S = 3
 
 PROFILE_ICON_CANDIDATES = {
     'low-power':   ['power-profile-power-saver-symbolic',  'battery-low-symbolic'],
@@ -64,17 +56,73 @@ PROFILE_ICON_CANDIDATES = {
     'performance': ['power-profile-performance-symbolic',  'battery-full-charged-symbolic'],
 }
 
+SYSFS_PROFILE = '/sys/firmware/acpi/platform_profile'
+
 DEFAULT_ICON = 'input-keyboard'
+TRAY_DESKTOP = os.path.expanduser('~/.config/autostart/yoga-tray.desktop')
+CONFIG_DIR   = os.path.expanduser('~/.config/yoga-tray')
+
+# ── timing config ─────────────────────────────────────────────────────────────
+# Overridable via ~/.config/yoga-tray/timing.conf  (key = value, ms)
+#
+# notification_delay_ms is relative: effective debounce = max(check intervals) + delay.
+# This makes the batching invariant structurally guaranteed — no assertion needed.
+# Example: display_interval_ms=1000 + delay=500 → notification fires 1500 ms after first change.
+
+_TIMING_DEFAULTS = {
+    'notification_delay_ms':   500,   # extra ms after the slowest check before notification fires
+    'performance_interval_ms': 500,   # how often to check the current performance profile
+    'display_interval_ms':    1000,   # how often to check the current display refresh rate
+    'backlight_interval_ms':   500,   # how often to check the keyboard backlight brightness
+}
+
+def _load_timing():
+    cfg  = dict(_TIMING_DEFAULTS)
+    path = os.path.join(CONFIG_DIR, 'timing.conf')
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    k, _, v = line.partition('=')
+                    k = k.strip()
+                    if k in cfg:
+                        try:
+                            val = int(v.strip())
+                            if val > 0:
+                                cfg[k] = val
+                        except ValueError:
+                            pass
+    except OSError:
+        pass
+    return cfg
+
+TIMING = _load_timing()
+
+# ── evdev constants ───────────────────────────────────────────────────────────
+# KEY_FAVORITES (364) and KEY_REFRESH_RATE_TOGGLE (562) map to X11 keycodes
+# 372 and 570, both beyond X11's 8-255 limit. Handled via /dev/input directly.
+
+_EV_KEY                  = 1
+_KEY_FAVORITES           = 364
+_KEY_REFRESH_RATE_TOGGLE = 562
+_EVDEV_FMT               = 'llHHi'
+_EVDEV_SIZE              = struct.calcsize(_EVDEV_FMT)
 
 # ── key binding configuration ─────────────────────────────────────────────────
 
 BINDABLE_KEYS = [
-    # (id, menu_label, keysym, xmodmap_keycode_or_None, xmodmap_keysym_name_or_None)
-    ('prog1',   'Dark Mode',     'XF86Launch1',   None, None),
-    ('prog2',   'Audio Profile', 'XF86Launch2',   None, None),
-    ('prog3',   'Camera Blur',   'XF86Launch3',   None, None),
-    ('fav',     'Lenovo Star',   'XF86Favorites',  372, 'XF86Favorites'),
-    ('refresh', 'Refresh Rate',  'XF86Launch5',    570, 'XF86Launch5'),
+    # (id, menu_label, gsettings_keysym, evdev_code)
+    # evdev_code=None  → Cinnamon custom shortcut via gsettings
+    # evdev_code set   → command stored in config file, triggered via evdev thread
+    # Order matches physical keyboard layout top-to-bottom.
+    ('fav',     'Lenovo Star',   None,            _KEY_FAVORITES),
+    ('prog3',   'Camera Blur',   'XF86Launch3',  None),
+    ('prog2',   'Audio Profile', 'XF86Launch2',  None),
+    ('prog1',   'Dark Mode',     'XF86Launch1',  None),
+    ('refresh', 'Refresh Rate',  None,            _KEY_REFRESH_RATE_TOGGLE),
 ]
 
 PRESET_ACTIONS = [
@@ -83,19 +131,21 @@ PRESET_ACTIONS = [
      ' if echo "$t"|grep -qi dark;'
      ' then gsettings set org.cinnamon.desktop.interface gtk-theme "Mint-Y";'
      ' else gsettings set org.cinnamon.desktop.interface gtk-theme "Mint-Y-Dark"; fi\''),
-    ('Full screenshot',      'gnome-screenshot'),
-    ('Area screenshot',      'gnome-screenshot --area'),
-    ('Open file manager',    'nemo'),
-    ('Open terminal',        'gnome-terminal'),
-    ('Toggle refresh rate',  os.path.expanduser('~/.local/bin/refresh-rate-toggle')),
+    ('Full screenshot',     'gnome-screenshot'),
+    ('Area screenshot',     'gnome-screenshot --area'),
+    ('Open file manager',   'nemo'),
+    ('Open terminal',       'x-terminal-emulator'),
+    ('Toggle refresh rate', os.path.expanduser('~/.local/bin/refresh-rate-toggle')),
 ]
 
-# ── paths ─────────────────────────────────────────────────────────────────────
-
-TRAY_DESKTOP = os.path.expanduser('~/.config/autostart/yoga-tray.desktop')
-CONFIG_DIR    = os.path.expanduser('~/.config/yoga-tray')
-
 # ── optional libraries ────────────────────────────────────────────────────────
+
+try:
+    gi.require_version('XApp', '1.0')
+    from gi.repository import XApp
+    HAS_XAPP = True
+except (ValueError, ImportError):
+    HAS_XAPP = False
 
 try:
     gi.require_version('AppIndicator3', '0.1')
@@ -111,7 +161,7 @@ try:
 except Exception:
     HAS_NOTIFY = False
 
-# ── backend helpers ───────────────────────────────────────────────────────────
+# ── backend ───────────────────────────────────────────────────────────────────
 
 def _find_cmd(name):
     for path in [f'/usr/local/bin/{name}', shutil.which(name)]:
@@ -122,6 +172,51 @@ def _find_cmd(name):
 KBD_CMD     = _find_cmd('kbd-backlight')
 PROFILE_CMD = _find_cmd('platform-profile')
 REFRESH_CMD = _find_cmd('refresh-rate-toggle')
+
+
+def _sudo_run(cmd, *args):
+    try:
+        r = subprocess.run(['sudo', cmd] + list(args), capture_output=True, text=True, timeout=5)
+        return r.stdout.strip(), r.returncode == 0
+    except Exception as e:
+        return str(e), False
+
+
+def get_backlight():
+    if not KBD_CMD:
+        return 'error'
+    out, ok = _sudo_run(KBD_CMD, 'get')
+    return out if ok else 'error'
+
+
+def set_backlight(state):
+    if not KBD_CMD:
+        return False
+    _, ok = _sudo_run(KBD_CMD, 'set', state)
+    return ok
+
+
+def read_sysfs_brightness():
+    try:
+        with open(SYSFS_BRIGHTNESS) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return -1
+
+
+def read_profile():
+    try:
+        with open(SYSFS_PROFILE) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def set_profile(profile):
+    if not PROFILE_CMD:
+        return False
+    _, ok = _sudo_run(PROFILE_CMD, 'set', profile)
+    return ok
 
 
 def get_refresh_rate():
@@ -147,7 +242,71 @@ def toggle_refresh_rate():
         return False
 
 
-# ── gsettings / xmodmap key binding helpers ───────────────────────────────────
+def _find_ideapad_device():
+    try:
+        with open('/proc/bus/input/devices') as f:
+            content = f.read()
+        for block in content.split('\n\n'):
+            if 'Ideapad extra buttons' in block:
+                for line in block.splitlines():
+                    if line.startswith('H: Handlers='):
+                        m = re.search(r'event(\d+)', line)
+                        if m:
+                            return f'/dev/input/event{m.group(1)}'
+    except Exception:
+        pass
+    return None
+
+# ── persistent preferences ────────────────────────────────────────────────────
+
+def load_pref(name, default=''):
+    try:
+        with open(os.path.join(CONFIG_DIR, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def save_pref(name, value):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(os.path.join(CONFIG_DIR, name), 'w') as f:
+            f.write(str(value))
+    except OSError:
+        pass
+
+def _cmd_basename(cmd):
+    """Return the executable basename from a shell command string, or '' on parse error."""
+    try:
+        parts = shlex.split(cmd)
+        return os.path.basename(parts[0]) if parts else ''
+    except ValueError:
+        return ''
+
+# ── autostart ─────────────────────────────────────────────────────────────────
+
+def is_autostart_enabled():
+    return os.path.isfile(TRAY_DESKTOP)
+
+
+def set_autostart(enabled):
+    if enabled:
+        os.makedirs(os.path.dirname(TRAY_DESKTOP), exist_ok=True)
+        exe = shutil.which('yoga-tray') or sys.argv[0]
+        with open(TRAY_DESKTOP, 'w') as f:
+            f.write(
+                '[Desktop Entry]\nType=Application\nName=Yoga Tray\n'
+                'Comment=Keyboard backlight and performance profile for Yoga 9i Gen 7\n'
+                f'Exec={exe}\nIcon={DEFAULT_ICON}\nStartupNotify=false\n'
+                'X-GNOME-Autostart-enabled=true\n'
+            )
+    else:
+        try:
+            os.remove(TRAY_DESKTOP)
+        except FileNotFoundError:
+            pass
+
+# ── gsettings helpers ─────────────────────────────────────────────────────────
 
 def _parse_gs_list(raw):
     raw = raw.strip()
@@ -165,7 +324,7 @@ def _gs_find_slot(ksym):
             text=True, timeout=3, stderr=subprocess.DEVNULL,
         )
         for slot in _parse_gs_list(out):
-            path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+            path   = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
             schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
             b = subprocess.check_output(
                 ['gsettings', 'get', schema, 'binding'], text=True, timeout=3,
@@ -197,7 +356,7 @@ def _gs_get_binding(ksym):
     if not slot:
         return None, None
     try:
-        path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+        path   = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
         schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
         name = subprocess.check_output(
             ['gsettings', 'get', schema, 'name'], text=True, timeout=3,
@@ -226,7 +385,7 @@ def _gs_set_binding(ksym, name, command):
                 ['gsettings', 'set', 'org.cinnamon.desktop.keybindings', 'custom-list', new_list],
                 timeout=3, check=False,
             )
-        path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+        path   = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
         schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
         subprocess.run(['gsettings', 'set', schema, 'name',    name],          timeout=3, check=False)
         subprocess.run(['gsettings', 'set', schema, 'command', command],       timeout=3, check=False)
@@ -240,7 +399,7 @@ def _gs_clear_binding(ksym):
         slot = _gs_find_slot(ksym)
         if not slot:
             return
-        path = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
+        path   = f'/org/cinnamon/desktop/keybindings/custom-keybindings/{slot}/'
         schema = f'org.cinnamon.desktop.keybindings.custom-keybinding:{path}'
         subprocess.run(['gsettings', 'set', schema, 'binding', '[]'], timeout=3, check=False)
         out = subprocess.check_output(
@@ -248,7 +407,7 @@ def _gs_clear_binding(ksym):
             text=True, timeout=3, stderr=subprocess.DEVNULL,
         )
         remaining = [s for s in _parse_gs_list(out) if s != slot]
-        new_list = "['" + "', '".join(remaining) + "']" if remaining else '[]'
+        new_list  = "['" + "', '".join(remaining) + "']" if remaining else '[]'
         subprocess.run(
             ['gsettings', 'set', 'org.cinnamon.desktop.keybindings', 'custom-list', new_list],
             timeout=3, check=False,
@@ -257,493 +416,535 @@ def _gs_clear_binding(ksym):
         pass
 
 
-def _ensure_xmodmap(keycode, keysym_name):
-    try:
-        subprocess.run(['xmodmap', '-e', f'keycode {keycode} = {keysym_name}'], timeout=3, check=False)
-        xmod = os.path.expanduser('~/.Xmodmap')
-        entry = f'keycode {keycode} = {keysym_name}'
-        try:
-            with open(xmod) as f:
-                if entry in f.read():
-                    return
-        except FileNotFoundError:
-            pass
-        with open(xmod, 'a') as f:
-            f.write(entry + '\n')
-    except Exception:
+# ── TraySection base class ────────────────────────────────────────────────────
+
+class TraySection:
+    """
+    Base for every tray menu section.
+
+    Subclasses must implement:
+      read_state()          → hashable current state
+      update_display(state) → update all widgets for this state
+      build_menu_items()    → list of Gtk widgets
+
+    The base handles automatically:
+      - Periodic polling (set poll_interval_ms on the subclass)
+      - Change detection — update_display only called when state changes
+      - Notification debouncing — fires after notify_debounce_ms of stable state
+      - Spurious-notification suppression — apply_change sets _last_state so
+        the next poll doesn't treat a user action as an external change
+      - on_menu_open defaults to refresh()
+
+    Optional overrides:
+      notify_info(state)   → (title, body, icon) or None to suppress
+      build_window_frame() → Gtk.Frame for the control panel, or None
+      teardown_window()    → clear window widget refs when panel closes
+      setup(tray)          → extra init; call super().setup(tray) first
+      on_menu_open()       → called on every menu open
+    """
+
+    poll_interval_ms = None
+
+    def __init__(self):
+        self._last_state = None
+        self._tray       = None
+
+    def setup(self, tray):
+        self._tray = tray
+        if self.poll_interval_ms:
+            GLib.timeout_add(self.poll_interval_ms, self._poll_tick)
+
+    def _poll_tick(self):
+        self.refresh()
+        return True
+
+    def refresh(self):
+        state = self.read_state()
+        if state != self._last_state:
+            if self._last_state is not None:
+                self._schedule_notify(state)
+            self._last_state = state
+            self.update_display(state)
+        return True
+
+    def apply_change(self, value):
+        """Apply a user-initiated change and immediately reflect it in the UI."""
+        if self._do_apply(value):
+            self._last_state = value
+            self.update_display(value)
+
+    def _do_apply(self, value):
+        return False
+
+    def on_menu_open(self):
+        self.refresh()
+
+    def _schedule_notify(self, state):
+        if not (self._tray and self._tray.notifications_enabled and HAS_NOTIFY):
+            return
+        if not self.notify_info(state):
+            return
+        self._tray.queue_notify(self)
+
+    def read_state(self):
+        raise NotImplementedError
+
+    def update_display(self, state):
+        raise NotImplementedError
+
+    def notify_info(self, state):
+        return None
+
+    def build_menu_items(self):
+        raise NotImplementedError
+
+    def build_window_frame(self):
+        return None
+
+    def teardown_window(self):
         pass
 
 
-def _sudo_run(cmd, *args):
-    try:
-        r = subprocess.run(
-            ['sudo', cmd] + list(args),
-            capture_output=True, text=True, timeout=5,
-        )
-        return r.stdout.strip(), r.returncode == 0
-    except Exception as e:
-        return str(e), False
+# ── BacklightSection ──────────────────────────────────────────────────────────
 
+class BacklightSection(TraySection):
+    """
+    Keyboard backlight control.
 
-def get_backlight():
-    if not KBD_CMD:
-        return 'error'
-    out, ok = _sudo_run(KBD_CMD, 'get')
-    return out if ok else 'error'
+    Two polling tiers:
+      500 ms sysfs read  — cheap, no sudo, catches Fn+Space instantly
+      30 s ACPI read     — catches the auto↔off transition that both read
+                           0 in sysfs and so can't be distinguished cheaply
+    """
 
-
-def set_backlight(state):
-    if not KBD_CMD:
-        return False
-    _, ok = _sudo_run(KBD_CMD, 'set', state)
-    return ok
-
-
-def read_sysfs_brightness():
-    try:
-        with open(SYSFS_BRIGHTNESS) as f:
-            return int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return -1
-
-
-def read_profile():
-    try:
-        with open(SYSFS_PROFILE) as f:
-            return f.read().strip()
-    except Exception:
-        return None
-
-
-def set_profile(profile):
-    if not PROFILE_CMD:
-        return False
-    _, ok = _sudo_run(PROFILE_CMD, 'set', profile)
-    return ok
-
-# ── persistent preferences ────────────────────────────────────────────────────
-
-def load_pref(name, default):
-    try:
-        with open(os.path.join(CONFIG_DIR, name)) as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return default
-
-
-def save_pref(name, value):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(os.path.join(CONFIG_DIR, name), 'w') as f:
-        f.write(str(value))
-
-# ── autostart ─────────────────────────────────────────────────────────────────
-
-def is_autostart_enabled():
-    return os.path.isfile(TRAY_DESKTOP)
-
-
-def set_autostart(enabled):
-    if enabled:
-        os.makedirs(os.path.dirname(TRAY_DESKTOP), exist_ok=True)
-        exe = shutil.which('yoga-tray') or sys.argv[0]
-        with open(TRAY_DESKTOP, 'w') as f:
-            f.write(
-                '[Desktop Entry]\n'
-                'Type=Application\n'
-                'Name=Yoga Tray\n'
-                'Comment=Keyboard backlight and performance profile for Yoga 9i Gen 7\n'
-                f'Exec={exe}\n'
-                f'Icon={DEFAULT_ICON}\n'
-                'StartupNotify=false\n'
-                'X-GNOME-Autostart-enabled=true\n'
-            )
-    else:
-        try:
-            os.remove(TRAY_DESKTOP)
-        except FileNotFoundError:
-            pass
-
-# ── tray app ──────────────────────────────────────────────────────────────────
-
-class YogaTray:
     def __init__(self):
-        self._bl_updating      = False
-        self._last_backlight   = None
-        self._last_sysfs_br    = read_sysfs_brightness()
-        self._bl_notify_timer  = None
+        super().__init__()
+        self._updating     = False
+        self._win_updating = False
+        self._last_sysfs   = -1
+        self._win_radio    = {}
 
-        self._pf_updating      = False
-        self._last_profile     = None
-        self._pf_notify_timer  = None
+    def setup(self, tray):
+        super().setup(tray)
+        self._last_sysfs = read_sysfs_brightness()
+        GLib.timeout_add(TIMING['backlight_interval_ms'], self._sysfs_poll)
+        GLib.timeout_add_seconds(30, self._slow_poll)
 
-        self._rr_updating      = False
-        self._last_rate        = None
+    def _sysfs_poll(self):
+        val = read_sysfs_brightness()
+        if val != self._last_sysfs:
+            self._last_sysfs = val
+            GLib.idle_add(self.refresh)
+        return True
 
-        self.kb_menu_items     = {}
+    def _slow_poll(self):
+        self.refresh()
+        return True
 
-        self._profile_icons = self._resolve_profile_icons()
+    def read_state(self):
+        return get_backlight()
 
-        self._build_menu()
+    def _do_apply(self, state):
+        return set_backlight(state)
 
-        if HAS_APPINDICATOR:
-            self.indicator = AppIndicator3.Indicator.new(
-                'yoga-tray',
-                DEFAULT_ICON,
-                AppIndicator3.IndicatorCategory.HARDWARE,
-            )
-            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
-            self.indicator.set_menu(self.menu)
-        else:
-            self.status_icon = Gtk.StatusIcon.new_from_icon_name(DEFAULT_ICON)
-            self.status_icon.set_tooltip_text('Yoga 9i — Backlight & Profile')
-            self.status_icon.connect('popup-menu', self._on_statusicon_popup)
+    def update_display(self, state):
+        installed = KBD_CMD is not None
+        self._warn_item.set_visible(not installed)
+        for item in self._radio.values():
+            item.set_visible(installed)
+        status = state if installed else 'not installed'
+        self._header_item.set_label(f'⌨  Backlight: {status}')
+        if state in self._radio:
+            self._updating = True
+            self._radio[state].set_active(True)
+            self._updating = False
+        if self._win_radio and state in self._win_radio:
+            self._win_updating = True
+            self._win_radio[state].set_active(True)
+            self._win_updating = False
 
-        self.refresh_backlight()
-        self.refresh_profile()
-        self.refresh_refresh_rate()
+    def notify_info(self, state):
+        if state in ('error', None):
+            return None
+        labels = {k: v for k, v in BACKLIGHT_STATES}
+        return ('Keyboard Backlight', labels.get(state, state), DEFAULT_ICON)
 
-        GLib.timeout_add(BACKLIGHT_POLL_MS,          self._check_sysfs_brightness)
-        GLib.timeout_add(PROFILE_POLL_MS,            self._poll_profile)
-        GLib.timeout_add_seconds(REFRESH_RATE_POLL_S, self._poll_refresh_rate)
+    def build_menu_items(self):
+        items = []
 
-        xmodmap_file = os.path.expanduser('~/.Xmodmap')
-        if os.path.exists(xmodmap_file):
-            subprocess.Popen(['xmodmap', xmodmap_file])
+        self._header_item = Gtk.MenuItem(label='⌨  Backlight: …')
+        self._header_item.set_sensitive(False)
+        items.append(self._header_item)
 
-    # ── icon ──────────────────────────────────────────────────────────────────
+        self._warn_item = Gtk.MenuItem(label='⚠  kbd-backlight not installed — run sudo install.sh')
+        self._warn_item.set_sensitive(False)
+        self._warn_item.set_no_show_all(True)
+        items.append(self._warn_item)
 
-    def _resolve_profile_icons(self):
-        theme = Gtk.IconTheme.get_default()
-        result = {}
-        for key, candidates in PROFILE_ICON_CANDIDATES.items():
-            for name in candidates:
-                if theme.has_icon(name):
-                    result[key] = name
-                    break
-            else:
-                result[key] = DEFAULT_ICON
-        return result
+        items.append(Gtk.SeparatorMenuItem())
 
-    def _set_tray_icon(self, profile):
-        icon = self._profile_icons.get(profile, DEFAULT_ICON)
-        if HAS_APPINDICATOR:
-            label = PROFILE_LABELS.get(profile, profile or '')
-            self.indicator.set_icon_full(icon, label)
-            self.indicator.set_title(f'Profile: {label}')
-        else:
-            self.status_icon.set_from_icon_name(icon)
-
-    # ── menu ──────────────────────────────────────────────────────────────────
-
-    def _build_menu(self):
-        self.menu = Gtk.Menu()
-        self.menu.connect('show', lambda _: GLib.idle_add(self._on_menu_open))
-
-        # ── backlight section ─────────────────────────────────────────────────
-        bl_header = Gtk.MenuItem(label='⌨  Keyboard Backlight')
-        bl_header.set_sensitive(False)
-        self.menu.append(bl_header)
-
-        self.bl_state_item = Gtk.MenuItem(label='Current: …')
-        self.bl_state_item.set_sensitive(False)
-        self.menu.append(self.bl_state_item)
-
-        self.bl_warn_item = Gtk.MenuItem(label='⚠  kbd-backlight not installed — run sudo install.sh')
-        self.bl_warn_item.set_sensitive(False)
-        self.bl_warn_item.set_no_show_all(True)
-        self.menu.append(self.bl_warn_item)
-
-        self.menu.append(Gtk.SeparatorMenuItem())
-
-        self.bl_radio = {}
+        self._radio = {}
         group = None
         for key, label in BACKLIGHT_STATES:
             item = Gtk.RadioMenuItem.new_with_label(group, label)
             if group is None:
                 group = item.get_group()
-            item.connect('toggled', self._on_bl_toggled, key)
-            self.menu.append(item)
-            self.bl_radio[key] = item
+            item.connect('toggled', self._on_toggled, key)
+            items.append(item)
+            self._radio[key] = item
 
-        self.menu.append(Gtk.SeparatorMenuItem())
+        return items
 
-        # ── performance profile section ───────────────────────────────────────
-        pf_header = Gtk.MenuItem(label='  Performance Profile')
-        pf_header.set_sensitive(False)
-        self.menu.append(pf_header)
+    def _on_toggled(self, widget, state):
+        if not self._updating and widget.get_active():
+            self.apply_change(state)
 
-        self.pf_state_item = Gtk.MenuItem(label='Current: …')
-        self.pf_state_item.set_sensitive(False)
-        self.menu.append(self.pf_state_item)
+    def build_window_frame(self):
+        frame = Gtk.Frame(label='⌨  Keyboard Backlight')
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_border_width(8)
+        frame.add(box)
+        self._win_radio = {}
+        first = None
+        for key, label in BACKLIGHT_STATES:
+            btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
+            if first is None:
+                first = btn
+            btn.connect('toggled', self._on_win_toggled, key)
+            box.pack_start(btn, False, False, 0)
+            self._win_radio[key] = btn
+        if self._last_state in self._win_radio:
+            self._win_updating = True
+            self._win_radio[self._last_state].set_active(True)
+            self._win_updating = False
+        return frame
 
-        self.pf_warn_item = Gtk.MenuItem(label='⚠  platform-profile not installed — run sudo install.sh')
-        self.pf_warn_item.set_sensitive(False)
-        self.pf_warn_item.set_no_show_all(True)
-        self.menu.append(self.pf_warn_item)
+    def _on_win_toggled(self, widget, state):
+        if not self._win_updating and widget.get_active():
+            self.apply_change(state)
 
-        self.menu.append(Gtk.SeparatorMenuItem())
+    def teardown_window(self):
+        self._win_radio = {}
 
-        self.pf_radio = {}
+
+# ── ProfileSection ────────────────────────────────────────────────────────────
+
+class ProfileSection(TraySection):
+    """Performance profile control. Also drives the tray indicator icon."""
+
+    def __init__(self):
+        super().__init__()
+        self.poll_interval_ms = TIMING['performance_interval_ms']
+        self._updating        = False
+        self._win_updating    = False
+        self._icons           = {}
+        self._win_radio       = {}
+
+    def setup(self, tray):
+        super().setup(tray)
+        theme = Gtk.IconTheme.get_default()
+        for key, candidates in PROFILE_ICON_CANDIDATES.items():
+            for name in candidates:
+                if theme.has_icon(name):
+                    self._icons[key] = name
+                    break
+            else:
+                self._icons[key] = DEFAULT_ICON
+
+    def read_state(self):
+        return read_profile()
+
+    def _do_apply(self, profile):
+        return set_profile(profile)
+
+    def update_display(self, profile):
+        installed = PROFILE_CMD is not None
+        self._warn_item.set_visible(not installed)
+        for item in self._radio.values():
+            item.set_sensitive(installed)
+
+        if profile is None:
+            self._header_item.set_label('  Profile: unavailable')
+            return
+
+        label = PROFILE_LABELS.get(profile, profile or 'unknown')
+        self._header_item.set_label(f'  Profile: {label}')
+
+        if profile in self._radio:
+            self._updating = True
+            self._radio[profile].set_active(True)
+            self._updating = False
+
+        if self._win_radio and profile in self._win_radio:
+            self._win_updating = True
+            self._win_radio[profile].set_active(True)
+            self._win_updating = False
+
+        icon = self._icons.get(profile, DEFAULT_ICON)
+        self._tray.set_tray_icon(icon, f'Profile: {label}')
+
+    def notify_info(self, profile):
+        if not profile:
+            return None
+        label = PROFILE_LABELS.get(profile, profile)
+        icon  = self._icons.get(profile, DEFAULT_ICON)
+        return ('Performance Profile', label, icon)
+
+    def build_menu_items(self):
+        items = []
+
+        self._header_item = Gtk.MenuItem(label='  Profile: …')
+        self._header_item.set_sensitive(False)
+        items.append(self._header_item)
+
+        self._warn_item = Gtk.MenuItem(
+            label='⚠  platform-profile not installed — run sudo install.sh'
+        )
+        self._warn_item.set_sensitive(False)
+        self._warn_item.set_no_show_all(True)
+        items.append(self._warn_item)
+
+        items.append(Gtk.SeparatorMenuItem())
+
+        self._radio = {}
         group = None
         for key, label in PROFILES:
             item = Gtk.RadioMenuItem.new_with_label(group, label)
             if group is None:
                 group = item.get_group()
-            item.connect('toggled', self._on_pf_toggled, key)
-            self.menu.append(item)
-            self.pf_radio[key] = item
+            item.connect('toggled', self._on_toggled, key)
+            items.append(item)
+            self._radio[key] = item
 
-        self.menu.append(Gtk.SeparatorMenuItem())
+        return items
 
-        # ── refresh rate section ──────────────────────────────────────────────
-        rr_header = Gtk.MenuItem(label='  Refresh Rate')
-        rr_header.set_sensitive(False)
-        self.menu.append(rr_header)
+    def _on_toggled(self, widget, profile):
+        if not self._updating and widget.get_active():
+            self.apply_change(profile)
 
-        self.rr_state_item = Gtk.MenuItem(label='Current: …')
-        self.rr_state_item.set_sensitive(False)
-        self.menu.append(self.rr_state_item)
+    def build_window_frame(self):
+        frame = Gtk.Frame(label='  Performance Profile')
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_border_width(8)
+        frame.add(box)
+        self._win_radio = {}
+        first = None
+        for key, label in PROFILES:
+            btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
+            if first is None:
+                first = btn
+            btn.connect('toggled', self._on_win_toggled, key)
+            box.pack_start(btn, False, False, 0)
+            self._win_radio[key] = btn
+        if self._last_state in self._win_radio:
+            self._win_updating = True
+            self._win_radio[self._last_state].set_active(True)
+            self._win_updating = False
+        return frame
 
-        self.rr_warn_item = Gtk.MenuItem(
+    def _on_win_toggled(self, widget, profile):
+        if not self._win_updating and widget.get_active():
+            self.apply_change(profile)
+
+    def teardown_window(self):
+        self._win_radio = {}
+
+
+# ── RefreshRateSection ────────────────────────────────────────────────────────
+
+class RefreshRateSection(TraySection):
+    """Refresh rate toggle (90 Hz ↔ 60 Hz)."""
+
+    def __init__(self):
+        super().__init__()
+        self.poll_interval_ms = TIMING['display_interval_ms']
+        self._win_updating    = False
+        self._win_radio       = {}
+
+    def read_state(self):
+        return get_refresh_rate()
+
+    def update_display(self, rate):
+        installed = REFRESH_CMD is not None
+        self._warn_item.set_visible(not installed)
+        self._toggle_item.set_visible(installed)
+        if installed:
+            self._toggle_item.set_sensitive(rate is not None)
+            if rate is None:
+                self._toggle_item.set_label('  Refresh Rate: unavailable')
+            else:
+                other = 60 if rate == 90 else 90
+                self._toggle_item.set_label(f'  Refresh Rate: {rate} Hz → {other} Hz')
+        if self._win_radio and rate in self._win_radio:
+            self._win_updating = True
+            self._win_radio[rate].set_active(True)
+            self._win_updating = False
+
+    def build_menu_items(self):
+        items = []
+
+        self._warn_item = Gtk.MenuItem(
             label='⚠  refresh-rate-toggle not installed — run install-tray.sh'
         )
-        self.rr_warn_item.set_sensitive(False)
-        self.rr_warn_item.set_no_show_all(True)
-        self.menu.append(self.rr_warn_item)
+        self._warn_item.set_sensitive(False)
+        self._warn_item.set_no_show_all(True)
+        items.append(self._warn_item)
 
-        self.menu.append(Gtk.SeparatorMenuItem())
+        self._toggle_item = Gtk.MenuItem(label='  Refresh Rate: … → …')
+        self._toggle_item.connect('activate', self._on_toggle)
+        items.append(self._toggle_item)
 
-        self.rr_radio = {}
-        group = None
-        for hz, label in [(90, '90 Hz'), (60, '60 Hz — Power Saver')]:
-            item = Gtk.RadioMenuItem.new_with_label(group, label)
-            if group is None:
-                group = item.get_group()
-            item.connect('toggled', self._on_rr_toggled, hz)
-            self.menu.append(item)
-            self.rr_radio[hz] = item
+        return items
 
-        self.menu.append(Gtk.SeparatorMenuItem())
-
-        # ── key bindings section ──────────────────────────────────────────────
-        kb_header = Gtk.MenuItem(label='  Key Bindings')
-        kb_header.set_sensitive(False)
-        self.menu.append(kb_header)
-
-        for key_id, display_label, *_ in BINDABLE_KEYS:
-            item = Gtk.MenuItem(label=f'{display_label}  […]')
-            self.menu.append(item)
-            self.kb_menu_items[key_id] = item
-
-        self.menu.append(Gtk.SeparatorMenuItem())
-
-        # ── preferences ───────────────────────────────────────────────────────
-        self.notif_item = Gtk.CheckMenuItem(label='Notifications')
-        self.notif_item.set_active(load_pref('notifications', 'true') == 'true')
-        self.notif_item.connect('toggled', lambda w: save_pref(
-            'notifications', 'true' if w.get_active() else 'false'
-        ))
-        self.menu.append(self.notif_item)
-
-        self.startup_item = Gtk.CheckMenuItem(label='Run on startup')
-        self.startup_item.set_active(is_autostart_enabled())
-        self.startup_item.connect('toggled', lambda w: set_autostart(w.get_active()))
-        self.menu.append(self.startup_item)
-
-        self.menu.append(Gtk.SeparatorMenuItem())
-
-        quit_item = Gtk.MenuItem(label='Quit')
-        quit_item.connect('activate', lambda _: Gtk.main_quit())
-        self.menu.append(quit_item)
-
-        self.menu.show_all()
-
-    def _on_menu_open(self):
-        self.refresh_backlight()
-        self.refresh_profile()
-        self.refresh_refresh_rate()
-        self._rebuild_key_binding_submenus()
-
-    # ── backlight callbacks ───────────────────────────────────────────────────
-
-    def _on_statusicon_popup(self, icon, button, time):
-        self.menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
-
-    def _on_bl_toggled(self, widget, state):
-        if not self._bl_updating and widget.get_active():
-            if set_backlight(state):
-                self._last_backlight = state
-                self.bl_state_item.set_label(f'Current: {state}')
-
-    def _check_sysfs_brightness(self):
-        val = read_sysfs_brightness()
-        if val != self._last_sysfs_br:
-            self._last_sysfs_br = val
-            GLib.idle_add(self.refresh_backlight)
-        return True
-
-    def refresh_backlight(self):
-        installed = KBD_CMD is not None
-        self.bl_warn_item.set_visible(not installed)
-        for item in self.bl_radio.values():
-            item.set_visible(installed)
-
-        if not installed:
-            self.bl_state_item.set_label('Current: not installed')
-            return True
-
-        state = get_backlight()
-        if state != self._last_backlight:
-            if self._last_backlight is not None:
-                self._schedule_notification('backlight', state)
-            self._last_backlight = state
-
-        self.bl_state_item.set_label(f'Current: {state}')
-        if state in self.bl_radio:
-            self._bl_updating = True
-            self.bl_radio[state].set_active(True)
-            self._bl_updating = False
-
-        return True
-
-    # ── profile callbacks ─────────────────────────────────────────────────────
-
-    def _on_pf_toggled(self, widget, profile):
-        if not self._pf_updating and widget.get_active():
-            if set_profile(profile):
-                self._last_profile = profile
-                self._update_profile_display(profile)
-
-    def _poll_profile(self):
-        self.refresh_profile()
-        return True
-
-    def refresh_profile(self):
-        installed = PROFILE_CMD is not None
-        self.pf_warn_item.set_visible(not installed)
-        for item in self.pf_radio.values():
-            item.set_sensitive(installed)
-
-        profile = read_profile()
-        if profile is None:
-            self.pf_state_item.set_label('Current: unavailable')
-            return True
-
-        if profile != self._last_profile:
-            if self._last_profile is not None:
-                self._schedule_notification('profile', profile)
-            self._last_profile = profile
-            self._update_profile_display(profile)
-
-        return True
-
-    def _update_profile_display(self, profile):
-        label = PROFILE_LABELS.get(profile, profile or 'unknown')
-        self.pf_state_item.set_label(f'Current: {label}')
-        self._set_tray_icon(profile)
-
-        if profile in self.pf_radio:
-            self._pf_updating = True
-            self.pf_radio[profile].set_active(True)
-            self._pf_updating = False
-
-    # ── notifications ─────────────────────────────────────────────────────────
-
-    def _schedule_notification(self, kind, value):
-        if not HAS_NOTIFY or not self.notif_item.get_active():
+    def _on_toggle(self, _widget):
+        if self._last_state is None:
             return
-        if kind == 'backlight':
-            if self._bl_notify_timer is not None:
-                GLib.source_remove(self._bl_notify_timer)
-            self._bl_notify_timer = GLib.timeout_add(
-                BACKLIGHT_DEBOUNCE_MS, self._fire_backlight_notification, value
-            )
+        toggle_refresh_rate()
+        new_rate = 60 if self._last_state == 90 else 90
+        self._last_state = new_rate
+        self.update_display(new_rate)
+
+    def build_window_frame(self):
+        frame = Gtk.Frame(label='  Refresh Rate')
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_border_width(8)
+        frame.add(box)
+        self._win_radio = {}
+        first = None
+        for hz, label in [(90, '90 Hz'), (60, '60 Hz')]:
+            btn = Gtk.RadioButton.new_with_label_from_widget(first, label)
+            if first is None:
+                first = btn
+            btn.connect('toggled', self._on_win_toggled, hz)
+            box.pack_start(btn, False, False, 0)
+            self._win_radio[hz] = btn
+        if self._last_state in self._win_radio:
+            self._win_updating = True
+            self._win_radio[self._last_state].set_active(True)
+            self._win_updating = False
+        return frame
+
+    def _on_win_toggled(self, widget, hz):
+        if not self._win_updating and widget.get_active() and hz != self._last_state:
+            toggle_refresh_rate()
+            self._last_state = hz
+            self.update_display(hz)
+
+    def teardown_window(self):
+        self._win_radio = {}
+
+
+# ── KeyBindingsSection ────────────────────────────────────────────────────────
+
+class KeyBindingsSection(TraySection):
+    """
+    Bindable special keys.
+
+    Keys with X11 keycodes <= 255 use Cinnamon gsettings custom shortcuts.
+    Keys with keycodes > 255 (star, refresh rate) bypass X11 entirely and are
+    handled by a background thread reading /dev/input directly. Requires the
+    user to be in the 'input' group; a warning is shown if access is denied.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._key_items  = {}
+        self._evdev_ok   = False
+        self._win_rows   = {}
+
+    def setup(self, tray):
+        super().setup(tray)
+        self._evdev_ok = self._start_evdev_thread()
+        if hasattr(self, '_evdev_warn_item'):
+            self._evdev_warn_item.set_visible(not self._evdev_ok)
+
+    def _start_evdev_thread(self):
+        device = _find_ideapad_device()
+        if not device:
+            return False
+        try:
+            with open(device, 'rb'):
+                pass
+        except PermissionError:
+            return False
+        t = threading.Thread(target=self._evdev_loop, args=(device,), daemon=True)
+        t.start()
+        return True
+
+    def _evdev_loop(self, device_path):
+        try:
+            with open(device_path, 'rb') as f:
+                while True:
+                    data = f.read(_EVDEV_SIZE)
+                    if len(data) < _EVDEV_SIZE:
+                        break
+                    _, _, ev_type, code, value = struct.unpack(_EVDEV_FMT, data)
+                    if ev_type == _EV_KEY and value == 1:
+                        if code == _KEY_FAVORITES:
+                            GLib.idle_add(self._run_key_cmd, 'fav')
+                        elif code == _KEY_REFRESH_RATE_TOGGLE:
+                            GLib.idle_add(self._run_key_cmd, 'refresh')
+        except Exception:
+            pass
+
+    def _run_key_cmd(self, key_id):
+        cmd = load_pref(f'{key_id}-cmd', '').strip()
+        if cmd:
+            try:
+                subprocess.Popen(shlex.split(cmd))
+            except Exception:
+                pass
+        return False
+
+    # ── TraySection interface ─────────────────────────────────────────────────
+    # Key bindings are configuration, not hardware state. We always rebuild
+    # the display from config files rather than tracking a "previous state".
+
+    def read_state(self):
+        return None
+
+    def refresh(self):
+        self.update_display(None)
+        return True
+
+    def on_menu_open(self):
+        self.update_display(None)
+
+    def update_display(self, _state):
+        for row in BINDABLE_KEYS:
+            self._update_key_item(*row)
+        if self._win_rows:
+            self._update_win_rows()
+
+    # ── key item helpers ──────────────────────────────────────────────────────
+
+    def _update_key_item(self, key_id, display_label, ksym, evdev_code):
+        item = self._key_items.get(key_id)
+        if not item:
+            return
+        if evdev_code is not None:
+            cmd    = load_pref(f'{key_id}-cmd', '').strip()
+            name   = load_pref(f'{key_id}-name', '').strip()
+            status = name or _cmd_basename(cmd) or 'not bound'
         else:
-            if self._pf_notify_timer is not None:
-                GLib.source_remove(self._pf_notify_timer)
-            self._pf_notify_timer = GLib.timeout_add(
-                PROFILE_DEBOUNCE_MS, self._fire_profile_notification, value
-            )
-
-    def _fire_backlight_notification(self, state):
-        self._bl_notify_timer = None
-        if not self.notif_item.get_active() or state != self._last_backlight:
-            return False
-        labels = {k: v for k, v in BACKLIGHT_STATES}
-        n = Notify.Notification.new('Keyboard Backlight', labels.get(state, state), DEFAULT_ICON)
-        n.set_timeout(2000)
-        try:
-            n.show()
-        except Exception:
-            pass
-        return False
-
-    def _fire_profile_notification(self, profile):
-        self._pf_notify_timer = None
-        if not self.notif_item.get_active() or profile != self._last_profile:
-            return False
-        label = PROFILE_LABELS.get(profile, profile)
-        icon  = self._profile_icons.get(profile, DEFAULT_ICON)
-        n = Notify.Notification.new('Performance Profile', label, icon)
-        n.set_timeout(2000)
-        try:
-            n.show()
-        except Exception:
-            pass
-        return False
-
-    # ── refresh rate ──────────────────────────────────────────────────────────
-
-    def _on_rr_toggled(self, widget, hz):
-        if not self._rr_updating and widget.get_active():
-            if hz != self._last_rate:
-                toggle_refresh_rate()
-
-    def _poll_refresh_rate(self):
-        self.refresh_refresh_rate()
-        return True
-
-    def refresh_refresh_rate(self):
-        installed = REFRESH_CMD is not None
-        self.rr_warn_item.set_visible(not installed)
-        for item in self.rr_radio.values():
-            item.set_sensitive(installed)
-
-        rate = get_refresh_rate()
-        if rate is None:
-            self.rr_state_item.set_label('Current: unavailable')
-            return True
-
-        if rate != self._last_rate:
-            self._last_rate = rate
-            self._update_rr_display(rate)
-
-        return True
-
-    def _update_rr_display(self, rate):
-        self.rr_state_item.set_label(f'Current: {rate} Hz')
-        if rate in self.rr_radio:
-            self._rr_updating = True
-            self.rr_radio[rate].set_active(True)
-            self._rr_updating = False
-
-    # ── key bindings ──────────────────────────────────────────────────────────
-
-    def _rebuild_key_binding_submenus(self):
-        for key_id, display_label, ksym, xmodmap_keycode, xmodmap_name in BINDABLE_KEYS:
-            item = self.kb_menu_items.get(key_id)
-            if not item:
-                continue
             name, _ = _gs_get_binding(ksym)
-            status = name if name else 'not bound'
-            item.set_label(f'{display_label}  [{status}]')
-            item.set_submenu(self._build_key_submenu(ksym, xmodmap_keycode, xmodmap_name))
+            status   = name if name else 'not bound'
+        item.set_label(f'{display_label}  [{status}]')
+        item.set_submenu(self._build_key_submenu(key_id, ksym, evdev_code))
 
-    def _build_key_submenu(self, ksym, xmodmap_keycode, xmodmap_name):
+    def _build_key_submenu(self, key_id, ksym, evdev_code):
         submenu = Gtk.Menu()
 
-        name, _ = _gs_get_binding(ksym)
-        header = Gtk.MenuItem(label=f'Bound: {name}' if name else 'Not bound')
+        if evdev_code is not None:
+            cmd         = load_pref(f'{key_id}-cmd', '').strip()
+            name        = load_pref(f'{key_id}-name', '').strip()
+            label       = name or _cmd_basename(cmd)
+            header_text = f'Bound: {label}' if label else 'Not bound'
+        else:
+            name, _     = _gs_get_binding(ksym)
+            header_text = f'Bound: {name}' if name else 'Not bound'
+
+        header = Gtk.MenuItem(label=header_text)
         header.set_sensitive(False)
         submenu.append(header)
         submenu.append(Gtk.SeparatorMenuItem())
@@ -751,34 +952,47 @@ class YogaTray:
         for action_label, action_cmd in PRESET_ACTIONS:
             mi = Gtk.MenuItem(label=action_label)
             mi.connect('activate', self._on_bind_preset,
-                       ksym, action_label, action_cmd, xmodmap_keycode, xmodmap_name)
+                       key_id, ksym, evdev_code, action_label, action_cmd)
             submenu.append(mi)
 
         submenu.append(Gtk.SeparatorMenuItem())
 
         enter_mi = Gtk.MenuItem(label='Enter command…')
-        enter_mi.connect('activate', self._on_bind_custom, ksym, xmodmap_keycode, xmodmap_name)
+        enter_mi.connect('activate', self._on_bind_custom, key_id, ksym, evdev_code)
         submenu.append(enter_mi)
 
         browse_mi = Gtk.MenuItem(label='Browse for executable…')
-        browse_mi.connect('activate', self._on_bind_browse, ksym, xmodmap_keycode, xmodmap_name)
+        browse_mi.connect('activate', self._on_bind_browse, key_id, ksym, evdev_code)
         submenu.append(browse_mi)
 
         submenu.append(Gtk.SeparatorMenuItem())
 
         clear_mi = Gtk.MenuItem(label='Clear binding')
-        clear_mi.connect('activate', self._on_clear_binding, ksym)
+        clear_mi.connect('activate', self._on_clear_binding, key_id, ksym, evdev_code)
         submenu.append(clear_mi)
 
         submenu.show_all()
         return submenu
 
-    def _on_bind_preset(self, widget, ksym, name, cmd, xmodmap_keycode, xmodmap_name):
-        if xmodmap_keycode:
-            _ensure_xmodmap(xmodmap_keycode, xmodmap_name)
-        _gs_set_binding(ksym, name, cmd)
+    # ── bind callbacks ────────────────────────────────────────────────────────
 
-    def _on_bind_custom(self, widget, ksym, xmodmap_keycode, xmodmap_name):
+    def _commit(self, key_id, ksym, evdev_code, name, cmd):
+        """Save binding and immediately refresh the tray item and window row."""
+        if evdev_code is not None:
+            save_pref(f'{key_id}-cmd', cmd)
+            save_pref(f'{key_id}-name', name)
+        else:
+            _gs_set_binding(ksym, name, cmd)
+        row = next((r for r in BINDABLE_KEYS if r[0] == key_id), None)
+        if row:
+            self._update_key_item(*row)
+        if self._win_rows:
+            self._update_win_rows()
+
+    def _on_bind_preset(self, widget, key_id, ksym, evdev_code, name, cmd):
+        self._commit(key_id, ksym, evdev_code, name, cmd)
+
+    def _on_bind_custom(self, widget, key_id, ksym, evdev_code):
         dialog = Gtk.Dialog(title='Key Binding — Enter Command', flags=0)
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                            Gtk.STOCK_OK,     Gtk.ResponseType.OK)
@@ -793,21 +1007,22 @@ class YogaTray:
         content.add(lbl)
         entry = Gtk.Entry()
         entry.set_width_chars(60)
-        _, current_cmd = _gs_get_binding(ksym)
-        if current_cmd:
-            entry.set_text(current_cmd)
+        entry.set_max_length(500)
+        current = (load_pref(f'{key_id}-cmd', '') if evdev_code is not None
+                   else (_gs_get_binding(ksym)[1] or ''))
+        if current:
+            entry.set_text(current)
         entry.connect('activate', lambda _: dialog.response(Gtk.ResponseType.OK))
         content.add(entry)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             cmd = entry.get_text().strip()
             if cmd:
-                if xmodmap_keycode:
-                    _ensure_xmodmap(xmodmap_keycode, xmodmap_name)
-                _gs_set_binding(ksym, cmd, cmd)
+                name = _cmd_basename(cmd) or cmd if evdev_code is not None else cmd
+                self._commit(key_id, ksym, evdev_code, name, cmd)
         dialog.destroy()
 
-    def _on_bind_browse(self, widget, ksym, xmodmap_keycode, xmodmap_name):
+    def _on_bind_browse(self, widget, key_id, ksym, evdev_code):
         dialog = Gtk.FileChooserDialog(
             title='Key Binding — Choose Executable',
             parent=None,
@@ -819,20 +1034,322 @@ class YogaTray:
         if dialog.run() == Gtk.ResponseType.OK:
             path = dialog.get_filename()
             if path:
-                if xmodmap_keycode:
-                    _ensure_xmodmap(xmodmap_keycode, xmodmap_name)
-                _gs_set_binding(ksym, os.path.basename(path), path)
+                self._commit(key_id, ksym, evdev_code, os.path.basename(path), path)
         dialog.destroy()
 
-    def _on_clear_binding(self, widget, ksym):
-        _gs_clear_binding(ksym)
+    def _on_clear_binding(self, widget, key_id, ksym, evdev_code):
+        if evdev_code is not None:
+            save_pref(f'{key_id}-cmd', '')
+            save_pref(f'{key_id}-name', '')
+        else:
+            _gs_clear_binding(ksym)
+        row = next((r for r in BINDABLE_KEYS if r[0] == key_id), None)
+        if row:
+            self._update_key_item(*row)
+        if self._win_rows:
+            self._update_win_rows()
+
+    # ── menu building ─────────────────────────────────────────────────────────
+
+    def build_menu_items(self):
+        items = []
+
+        header = Gtk.MenuItem(label='  Key Bindings')
+        header.set_sensitive(False)
+        items.append(header)
+
+        self._evdev_warn_item = Gtk.MenuItem(
+            label='⚠  Star/Refresh keys need "input" group — log out and back in'
+        )
+        self._evdev_warn_item.set_sensitive(False)
+        self._evdev_warn_item.set_no_show_all(True)
+        items.append(self._evdev_warn_item)
+
+        for key_id, display_label, *_ in BINDABLE_KEYS:
+            item = Gtk.MenuItem(label=f'{display_label}  […]')
+            items.append(item)
+            self._key_items[key_id] = item
+
+        return items
+
+    # ── window frame ──────────────────────────────────────────────────────────
+
+    def build_window_frame(self):
+        frame = Gtk.Frame(label='  Key Bindings')
+        grid = Gtk.Grid()
+        grid.set_border_width(8)
+        grid.set_column_spacing(12)
+        grid.set_row_spacing(6)
+        frame.add(grid)
+        self._win_rows = {}
+        for i, (key_id, display_label, ksym, evdev_code) in enumerate(BINDABLE_KEYS):
+            key_lbl = Gtk.Label(label=display_label)
+            key_lbl.set_xalign(0)
+            grid.attach(key_lbl, 0, i, 1, 1)
+            val_lbl = Gtk.Label(label='…')
+            val_lbl.set_xalign(0)
+            val_lbl.set_hexpand(True)
+            grid.attach(val_lbl, 1, i, 1, 1)
+            self._win_rows[key_id] = val_lbl
+            mb = Gtk.MenuButton(label='Change…')
+            mb.set_popup(self._build_win_key_menu(key_id, ksym, evdev_code))
+            grid.attach(mb, 2, i, 1, 1)
+        self._update_win_rows()
+        return frame
+
+    def _build_win_key_menu(self, key_id, ksym, evdev_code):
+        menu = Gtk.Menu()
+        for action_label, action_cmd in PRESET_ACTIONS:
+            mi = Gtk.MenuItem(label=action_label)
+            mi.connect('activate', self._on_bind_preset,
+                       key_id, ksym, evdev_code, action_label, action_cmd)
+            menu.append(mi)
+        menu.append(Gtk.SeparatorMenuItem())
+        enter_mi = Gtk.MenuItem(label='Enter command…')
+        enter_mi.connect('activate', self._on_bind_custom, key_id, ksym, evdev_code)
+        menu.append(enter_mi)
+        browse_mi = Gtk.MenuItem(label='Browse for executable…')
+        browse_mi.connect('activate', self._on_bind_browse, key_id, ksym, evdev_code)
+        menu.append(browse_mi)
+        menu.append(Gtk.SeparatorMenuItem())
+        clear_mi = Gtk.MenuItem(label='Clear binding')
+        clear_mi.connect('activate', self._on_clear_binding, key_id, ksym, evdev_code)
+        menu.append(clear_mi)
+        menu.show_all()
+        return menu
+
+    def _update_win_rows(self):
+        for key_id, _, ksym, evdev_code in BINDABLE_KEYS:
+            lbl = self._win_rows.get(key_id)
+            if not lbl:
+                continue
+            if evdev_code is not None:
+                cmd    = load_pref(f'{key_id}-cmd', '').strip()
+                name   = load_pref(f'{key_id}-name', '').strip()
+                status = name or _cmd_basename(cmd) or 'not bound'
+            else:
+                name, _ = _gs_get_binding(ksym)
+                status   = name if name else 'not bound'
+            lbl.set_label(status)
+
+    def teardown_window(self):
+        self._win_rows = {}
+
+
+# ── ControlPanel ──────────────────────────────────────────────────────────────
+
+class ControlPanel(Gtk.Window):
+    """Persistent companion window showing all tray controls in one place."""
+
+    def __init__(self, sections):
+        super().__init__(title='Yoga Options')
+        self.set_default_size(360, -1)
+        self.set_resizable(True)
+        self.set_border_width(12)
+        self._sections = sections
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.add(box)
+
+        for section in sections:
+            frame = section.build_window_frame()
+            if frame is not None:
+                box.pack_start(frame, False, False, 0)
+
+        self.connect('destroy', self._on_destroy)
+        self.show_all()
+
+    def _on_destroy(self, _):
+        for section in self._sections:
+            section.teardown_window()
+
+
+# ── YogaTray ──────────────────────────────────────────────────────────────────
+
+class YogaTray:
+    def __init__(self):
+        self._sections        = [
+            BacklightSection(),
+            ProfileSection(),
+            RefreshRateSection(),
+            KeyBindingsSection(),
+        ]
+        self._pending_notifs  = {}   # id(section) → section
+        self._notify_timer    = None
+        self._control_panel   = None
+
+        max_poll = max(
+            (s.poll_interval_ms for s in self._sections if s.poll_interval_ms),
+            default=0,
+        )
+        headroom = TIMING['notification_delay_ms']
+        assert headroom > 0, (
+            f"notification_delay_ms must be > 0 (got {headroom}). "
+            f"Fix in ~/.config/yoga-tray/timing.conf"
+        )
+        self._notify_debounce_ms = max_poll + headroom
+
+        self._build_menu()
+        self._setup_indicator()
+        for section in self._sections:
+            section.setup(self)
+        for section in self._sections:
+            section.refresh()
+
+    # ── indicator ─────────────────────────────────────────────────────────────
+
+    def _setup_indicator(self):
+        if HAS_XAPP:
+            self.status_icon = XApp.StatusIcon()
+            self.status_icon.set_icon_name(DEFAULT_ICON)
+            self.status_icon.set_tooltip_text('Yoga 9i — Backlight & Profile')
+            self.status_icon.set_secondary_menu(self.menu)
+            self.status_icon.connect('activate', lambda *_: self._open_control_panel())
+        elif HAS_APPINDICATOR:
+            self.indicator = AppIndicator3.Indicator.new(
+                'yoga-tray', DEFAULT_ICON, AppIndicator3.IndicatorCategory.HARDWARE,
+            )
+            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+            self.indicator.set_menu(self.menu)
+        else:
+            self.status_icon = Gtk.StatusIcon.new_from_icon_name(DEFAULT_ICON)
+            self.status_icon.set_tooltip_text('Yoga 9i — Backlight & Profile')
+            self.status_icon.connect('activate', lambda *_: self._open_control_panel())
+            self.status_icon.connect('popup-menu', self._on_statusicon_popup)
+
+    def _on_statusicon_popup(self, icon, button, time):
+        self.menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
+
+    def set_tray_icon(self, icon_name, title=''):
+        if HAS_XAPP:
+            self.status_icon.set_icon_name(icon_name)
+            if title:
+                self.status_icon.set_tooltip_text(title)
+        elif HAS_APPINDICATOR:
+            self.indicator.set_icon_full(icon_name, title)
+            if title:
+                self.indicator.set_title(title)
+        else:
+            self.status_icon.set_from_icon_name(icon_name)
+
+    @property
+    def notifications_enabled(self):
+        return HAS_NOTIFY and self._notif_item.get_active()
+
+    def queue_notify(self, section):
+        """Mark a section as having a pending notification. Timer starts once and is never reset —
+        rapid changes just overwrite the section's slot; fire time reads current state."""
+        self._pending_notifs[id(section)] = section
+        if self._notify_timer is None:
+            self._notify_timer = GLib.timeout_add(self._notify_debounce_ms, self._fire_combined_notify)
+
+    def _fire_combined_notify(self):
+        self._notify_timer = None
+        sections = list(self._pending_notifs.values())
+        self._pending_notifs.clear()
+        valid = [
+            info
+            for sec in sections
+            for info in [sec.notify_info(sec._last_state)]
+            if info
+        ]
+        if not valid:
+            return False
+        if len(valid) == 1:
+            title, body, icon = valid[0]
+        else:
+            title = 'Yoga Status'
+            body  = '\n'.join(f'{t}: {b}' for t, b, _ in valid)
+            icon  = DEFAULT_ICON
+        n = Notify.Notification.new(title, body, icon)
+        n.set_timeout(2000)
+        try:
+            n.show()
+        except Exception:
+            pass
+        return False
+
+    # ── control panel ─────────────────────────────────────────────────────────
+
+    def _open_control_panel(self):
+        if self._control_panel is None:
+            self._control_panel = ControlPanel(self._sections)
+            self._control_panel.connect('destroy',
+                lambda _: setattr(self, '_control_panel', None))
+        else:
+            self._control_panel.deiconify()
+            self._control_panel.present()
+
+    # ── menu ──────────────────────────────────────────────────────────────────
+
+    def _build_menu(self):
+        self.menu = Gtk.Menu()
+        self.menu.connect('show', lambda _: GLib.idle_add(self._on_menu_open))
+
+        for section in self._sections:
+            for widget in section.build_menu_items():
+                self.menu.append(widget)
+            self.menu.append(Gtk.SeparatorMenuItem())
+
+        self._notif_item = Gtk.CheckMenuItem(label='Notifications')
+        self._notif_item.set_active(load_pref('notifications', 'true') == 'true')
+        self._notif_item.connect('toggled', lambda w: save_pref(
+            'notifications', 'true' if w.get_active() else 'false'
+        ))
+        self.menu.append(self._notif_item)
+
+        startup_item = Gtk.CheckMenuItem(label='Run on startup')
+        startup_item.set_active(is_autostart_enabled())
+        startup_item.connect('toggled', lambda w: set_autostart(w.get_active()))
+        self.menu.append(startup_item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        panel_item = Gtk.MenuItem(label='Yoga Options…')
+        panel_item.connect('activate', lambda _: self._open_control_panel())
+        self.menu.append(panel_item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        quit_item = Gtk.MenuItem(label='Quit')
+        quit_item.connect('activate', lambda _: Gtk.main_quit())
+        self.menu.append(quit_item)
+
+        self.menu.show_all()
+
+    def _on_menu_open(self):
+        for section in self._sections:
+            section.on_menu_open()
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    YogaTray()
-    Gtk.main()
+    pid_file = os.path.join(CONFIG_DIR, 'yoga-tray.pid')
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+    try:
+        with open(pid_file, 'x') as f:
+            f.write(str(os.getpid()))
+    except FileExistsError:
+        try:
+            with open(pid_file) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)
+            sys.exit(0)
+        except (ValueError, ProcessLookupError, PermissionError):
+            # Stale PID file — overwrite and continue.
+            with open(pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+
+    try:
+        YogaTray()
+        Gtk.main()
+    finally:
+        try:
+            os.remove(pid_file)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == '__main__':

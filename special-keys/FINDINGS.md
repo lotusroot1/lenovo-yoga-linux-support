@@ -54,7 +54,7 @@ Linux Mint. Covers detection, key codes, and remapping.
 
 | Physical label | Linux keycode | Scan code | X11 keysym |
 |---|---|---|---|
-| Lenovo Star / Favorite | `KEY_FAVORITES` (364) | 0x101 | *(unmapped in X11 — needs xmodmap)* |
+| Lenovo Star / Favorite | `KEY_FAVORITES` (364) | 0x101 | *(evdev code 364 → X11 keycode 372, beyond X11's 8–255 limit — handled via `/dev/input` directly in `yoga-tray`)* |
 | Lenovo Support | `KEY_HELP` (138) | 0x7f | `Help` |
 
 ### Phantom capability entries (declared by driver, no physical key fires them)
@@ -180,15 +180,14 @@ the physical resolution is unchanged. No custom modelines or EDID patches are ne
 
 ## Remapping
 
-Keys that emit keycodes can be bound via Cinnamon custom shortcuts (gsettings).
-`KEY_FAVORITES` has no X11 keysym by default and needs an xmodmap entry first.
+Keys that emit standard keycodes (≤255) can be bound via Cinnamon custom shortcuts (gsettings). `KEY_FAVORITES` (364) and `KEY_REFRESH_RATE_TOGGLE` (562) map to X11 keycodes 372 and 570 — both beyond X11's 8–255 limit — so xmodmap cannot reach them. `yoga-tray` reads these directly from `/dev/input`, bypassing X11 entirely.
 
-See `remap.sh` for an interactive setup menu.
+All five bindable keys are configurable from the `yoga-tray` context menu or the **Yoga Options** companion window (left-click the tray icon). Physical keyboard order top-to-bottom:
 
-The three most useful candidates for custom bindings:
-
-| Key | Suggested action |
-|---|---|
-| `KEY_PROG1` / `XF86Launch1` | Toggle dark/light Cinnamon theme |
-| `KEY_PROG2` / `XF86Launch2` | Cycle audio output or profile |
-| `KEY_PROG3` / `XF86Launch3` | Screenshot, custom app, etc. |
+| Key | Evdev code | X11 reachable | Binding method |
+|---|---|---|---|
+| Lenovo Star | `KEY_FAVORITES` (364) | No | evdev direct read |
+| Camera Blur | `KEY_PROG3` (202) | Yes | Cinnamon gsettings |
+| Audio Profile | `KEY_PROG2` (149) | Yes | Cinnamon gsettings |
+| Dark Mode | `KEY_PROG1` (148) | Yes | Cinnamon gsettings |
+| Refresh Rate | `KEY_REFRESH_RATE_TOGGLE` (562) | No | evdev direct read |
