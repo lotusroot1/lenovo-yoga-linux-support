@@ -229,7 +229,7 @@ def _patch_xlib(monkeypatch, rate_hz, active=True):
     monkeypatch.setattr(yoga_tray, '_HAS_XLIB', True)
     monkeypatch.setattr(yoga_tray, '_IS_WAYLAND', False)
     monkeypatch.setattr(yoga_tray._xlib_display, 'Display', lambda: display_inst)
-    monkeypatch.setattr(yoga_tray._xlib_randr, 'get_screen_resources', lambda r: resources)
+    monkeypatch.setattr(yoga_tray._xlib_randr, 'get_screen_resources_current', lambda r: resources)
     monkeypatch.setattr(yoga_tray._xlib_randr, 'get_crtc_info', lambda r, c, t: crtc)
 
 

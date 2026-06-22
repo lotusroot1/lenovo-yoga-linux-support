@@ -39,6 +39,8 @@ try:
 except ImportError:
     _HAS_XLIB = False
 
+_xlib_conn = None   # persistent Display connection — opened once, reused
+
 _IS_WAYLAND = bool(os.environ.get('WAYLAND_DISPLAY')) or \
               os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
 
@@ -234,11 +236,14 @@ def get_refresh_rate():
 
 
 def _get_refresh_rate_x11():
+    global _xlib_conn
     if _HAS_XLIB:
         try:
-            d = _xlib_display.Display()
+            if _xlib_conn is None:
+                _xlib_conn = _xlib_display.Display()
+            d = _xlib_conn
             screen = d.screen()
-            res = _xlib_randr.get_screen_resources(screen.root)
+            res = _xlib_randr.get_screen_resources_current(screen.root)
             for crtc_id in res.crtcs:
                 crtc = _xlib_randr.get_crtc_info(screen.root, crtc_id, res.config_timestamp)
                 if crtc.mode:
@@ -247,6 +252,7 @@ def _get_refresh_rate_x11():
                             rate = round(mode.dot_clock / (mode.h_total * mode.v_total))
                             return 90 if rate >= 85 else 60
         except Exception:
+            _xlib_conn = None  # reset on error so next call reopens
             pass
     # fallback: xrandr subprocess (slow — only reached if python3-xlib is absent)
     try:
