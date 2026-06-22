@@ -27,6 +27,11 @@ fi
 python3 -c "import gi" 2>/dev/null \
     || die "python3-gi not found. Install: sudo apt install python3-gi"
 
+if ! python3 -c "from Xlib.ext import randr" 2>/dev/null; then
+    echo "    python3-xlib not found — refresh rate polling will fall back to xrandr subprocess"
+    echo "    Recommended: sudo apt install python3-xlib"
+fi
+
 if python3 -c "
 import gi; gi.require_version('XApp', '1.0')
 from gi.repository import XApp

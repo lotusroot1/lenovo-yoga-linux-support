@@ -215,47 +215,65 @@ class TestAutostart:
 
 # ── get_refresh_rate ──────────────────────────────────────────────────────────
 
-_XRANDR_90HZ = (
-    "Screen 0: minimum 8 x 8, current 2880 x 1800\n"
-    "eDP-1 connected primary 2880x1800+0+0\n"
-    "   2880x1800     90.00*+  60.00  \n"
-)
-_XRANDR_60HZ = (
-    "eDP-1 connected primary 2880x1800+0+0\n"
-    "   2880x1800     90.00+   60.00* \n"
-)
-_XRANDR_NO_STAR = (
-    "eDP-1 connected primary 2880x1800+0+0\n"
-    "   2880x1800     90.00    60.00  \n"
-)
+from types import SimpleNamespace
+
+
+def _patch_xlib(monkeypatch, rate_hz, active=True):
+    """Wire up minimal python-xlib fakes so _get_refresh_rate_x11 returns rate_hz."""
+    mode = SimpleNamespace(id=rate_hz, dot_clock=rate_hz, h_total=1, v_total=1)
+    resources = SimpleNamespace(modes=[mode], crtcs=[1], config_timestamp=0)
+    crtc = SimpleNamespace(mode=rate_hz if active else 0)
+    screen = SimpleNamespace(root=object())
+    display_inst = SimpleNamespace(screen=lambda: screen)
+
+    monkeypatch.setattr(yoga_tray, '_HAS_XLIB', True)
+    monkeypatch.setattr(yoga_tray, '_IS_WAYLAND', False)
+    monkeypatch.setattr(yoga_tray._xlib_display, 'Display', lambda: display_inst)
+    monkeypatch.setattr(yoga_tray._xlib_randr, 'get_screen_resources', lambda r: resources)
+    monkeypatch.setattr(yoga_tray._xlib_randr, 'get_crtc_info', lambda r, c, t: crtc)
 
 
 class TestGetRefreshRate:
     def test_detects_90hz(self, monkeypatch):
-        monkeypatch.setattr(subprocess, 'check_output', lambda *a, **kw: _XRANDR_90HZ)
+        _patch_xlib(monkeypatch, 90)
         assert yoga_tray.get_refresh_rate() == 90
 
     def test_detects_60hz(self, monkeypatch):
-        monkeypatch.setattr(subprocess, 'check_output', lambda *a, **kw: _XRANDR_60HZ)
+        _patch_xlib(monkeypatch, 60)
         assert yoga_tray.get_refresh_rate() == 60
 
-    def test_returns_none_when_no_active_mode(self, monkeypatch):
-        monkeypatch.setattr(subprocess, 'check_output', lambda *a, **kw: _XRANDR_NO_STAR)
-        assert yoga_tray.get_refresh_rate() is None
-
-    def test_returns_none_on_subprocess_error(self, monkeypatch):
-        def raise_err(*a, **kw): raise subprocess.SubprocessError('xrandr failed')
-        monkeypatch.setattr(subprocess, 'check_output', raise_err)
-        assert yoga_tray.get_refresh_rate() is None
-
     def test_85hz_rounds_up_to_90(self, monkeypatch):
-        monkeypatch.setattr(subprocess, 'check_output',
-                            lambda *a, **kw: "   2880x1800     85.00*+  60.00  \n")
+        _patch_xlib(monkeypatch, 85)
         assert yoga_tray.get_refresh_rate() == 90
 
     def test_84hz_rounds_down_to_60(self, monkeypatch):
+        _patch_xlib(monkeypatch, 84)
+        assert yoga_tray.get_refresh_rate() == 60
+
+    def test_returns_none_when_no_active_mode(self, monkeypatch):
+        _patch_xlib(monkeypatch, 90, active=False)
+        monkeypatch.setattr(subprocess, 'check_output', lambda *a, **kw: '')
+        assert yoga_tray._get_refresh_rate_x11() is None
+
+    def test_returns_none_on_xlib_error(self, monkeypatch):
+        def raise_xlib(): raise RuntimeError('xlib failed')
+        monkeypatch.setattr(yoga_tray, '_HAS_XLIB', True)
+        monkeypatch.setattr(yoga_tray, '_IS_WAYLAND', False)
+        monkeypatch.setattr(yoga_tray._xlib_display, 'Display', raise_xlib)
         monkeypatch.setattr(subprocess, 'check_output',
-                            lambda *a, **kw: "   2880x1800     90.00    84.99* \n")
+                            lambda *a, **kw: (_ for _ in ()).throw(subprocess.SubprocessError()))
+        assert yoga_tray._get_refresh_rate_x11() is None
+
+    def test_fallback_to_subprocess_when_no_xlib(self, monkeypatch):
+        monkeypatch.setattr(yoga_tray, '_HAS_XLIB', False)
+        monkeypatch.setattr(yoga_tray, '_IS_WAYLAND', False)
+        monkeypatch.setattr(subprocess, 'check_output',
+                            lambda *a, **kw: "   2880x1800     90.00*+  60.00  \n")
+        assert yoga_tray._get_refresh_rate_x11() == 90
+
+    def test_dispatches_to_wayland(self, monkeypatch):
+        monkeypatch.setattr(yoga_tray, '_IS_WAYLAND', True)
+        monkeypatch.setattr(yoga_tray, '_get_refresh_rate_wayland', lambda: 60)
         assert yoga_tray.get_refresh_rate() == 60
 
 

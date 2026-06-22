@@ -14,12 +14,13 @@ Linux support utilities for the Lenovo Yoga 9i Gen 7 (14IAP7) on Linux Mint / Ub
 - Linux kernel 6.2+ (special key evdev support merged ~6.1/6.2 via `ideapad_laptop`)
 - `acpi-call-dkms` — for keyboard backlight (ACPI KBLC method)
 - `python3-gi` — for the tray app
+- `python3-xlib` — refresh rate detection without spawning `xrandr` (avoids fullscreen video disruption)
 - `gir1.2-xapp-1.0` *(optional, recommended on Cinnamon/MATE)* — enables left-click to open the companion window; right-click for the menu
 - `gir1.2-appindicator3-0.1` *(optional, fallback)* — menu-only tray integration when XApp is unavailable
 - `gir1.2-notify-0.7` *(optional)* — desktop notifications on hardware key changes
 
 ```bash
-sudo apt install acpi-call-dkms python3-gi gir1.2-xapp-1.0 gir1.2-notify-0.7
+sudo apt install acpi-call-dkms python3-gi python3-xlib gir1.2-xapp-1.0 gir1.2-notify-0.7
 ```
 
 ## Install
@@ -78,6 +79,8 @@ sudo platform-profile set balanced
 
 Toggles between 90 Hz and 60 Hz. The built-in display (eDP-1) advertises both rates for the native 2880×1800 resolution in its EDID, so no custom modelines are needed.
 
+The tray reads the current rate via `python3-xlib` (RandR in-process on X11, or `org.gnome.Mutter.DisplayConfig` D-Bus on Wayland) rather than spawning `xrandr` periodically — this avoids disrupting fullscreen video rendering.
+
 ### Key bindings
 
 Binds commands to the Yoga-specific special keys. Order matches the physical keyboard layout:
@@ -107,12 +110,12 @@ Optional — create `~/.config/yoga-tray/timing.conf` to override defaults:
 ```ini
 # How often to check each hardware value (milliseconds)
 performance_interval_ms  = 500
-display_interval_ms      = 1000
+display_interval_ms      = 5000
 backlight_interval_ms    = 500
 
 # Extra settling time after the slowest check before a notification fires.
 # Effective debounce = max(intervals above) + notification_delay_ms
-# Default: 1000 + 500 = 1500 ms
+# Default: 5000 + 500 = 5500 ms
 notification_delay_ms    = 500
 ```
 

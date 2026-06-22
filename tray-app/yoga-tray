@@ -32,6 +32,16 @@ import os
 import re
 import threading
 
+try:
+    from Xlib import display as _xlib_display
+    from Xlib.ext import randr as _xlib_randr
+    _HAS_XLIB = True
+except ImportError:
+    _HAS_XLIB = False
+
+_IS_WAYLAND = bool(os.environ.get('WAYLAND_DISPLAY')) or \
+              os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+
 # ── constants ─────────────────────────────────────────────────────────────────
 
 BACKLIGHT_STATES = [
@@ -67,12 +77,12 @@ CONFIG_DIR   = os.path.expanduser('~/.config/yoga-tray')
 #
 # notification_delay_ms is relative: effective debounce = max(check intervals) + delay.
 # This makes the batching invariant structurally guaranteed — no assertion needed.
-# Example: display_interval_ms=1000 + delay=500 → notification fires 1500 ms after first change.
-
+# Example: display_interval_ms=30000 + delay=500 → notification fires 30500 ms after first change.
+#
 _TIMING_DEFAULTS = {
     'notification_delay_ms':   500,   # extra ms after the slowest check before notification fires
     'performance_interval_ms': 500,   # how often to check the current performance profile
-    'display_interval_ms':    1000,   # how often to check the current display refresh rate
+    'display_interval_ms':    5000,   # how often to poll display refresh rate
     'backlight_interval_ms':   500,   # how often to check the keyboard backlight brightness
 }
 
@@ -220,6 +230,25 @@ def set_profile(profile):
 
 
 def get_refresh_rate():
+    return _get_refresh_rate_wayland() if _IS_WAYLAND else _get_refresh_rate_x11()
+
+
+def _get_refresh_rate_x11():
+    if _HAS_XLIB:
+        try:
+            d = _xlib_display.Display()
+            screen = d.screen()
+            res = _xlib_randr.get_screen_resources(screen.root)
+            for crtc_id in res.crtcs:
+                crtc = _xlib_randr.get_crtc_info(screen.root, crtc_id, res.config_timestamp)
+                if crtc.mode:
+                    for mode in res.modes:
+                        if mode.id == crtc.mode:
+                            rate = round(mode.dot_clock / (mode.h_total * mode.v_total))
+                            return 90 if rate >= 85 else 60
+        except Exception:
+            pass
+    # fallback: xrandr subprocess (slow — only reached if python3-xlib is absent)
     try:
         out = subprocess.check_output(['xrandr'], text=True, timeout=3)
         for line in out.splitlines():
@@ -227,6 +256,23 @@ def get_refresh_rate():
                 m = re.search(r'(\d+\.\d+)\*', line)
                 if m:
                     return 90 if float(m.group(1)) >= 85 else 60
+    except Exception:
+        pass
+    return None
+
+
+def _get_refresh_rate_wayland():
+    try:
+        import dbus
+        bus = dbus.SessionBus()
+        proxy = bus.get_object('org.gnome.Mutter.DisplayConfig',
+                               '/org/gnome/Mutter/DisplayConfig')
+        iface = dbus.Interface(proxy, 'org.gnome.Mutter.DisplayConfig')
+        _, monitors, _, _ = iface.GetCurrentState()
+        for (_connector, _vendor, _product, _serial), modes, _props in monitors:
+            for _mid, _w, _h, rate, _pscale, _scales, mode_props in modes:
+                if mode_props.get('is-current'):
+                    return 90 if float(rate) >= 85 else 60
     except Exception:
         pass
     return None
