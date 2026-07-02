@@ -482,6 +482,9 @@ class TraySection:
     The base handles automatically:
       - Periodic polling (set poll_interval_ms on the subclass)
       - Change detection — update_display only called when state changes
+      - Read-failure debouncing — a lone FAILURE_STATE reading (e.g. a sysfs
+        read that hiccups under load) is ignored rather than treated as a
+        real transition and then a real transition back
       - Notification debouncing — fires after notify_debounce_ms of stable state
       - Spurious-notification suppression — apply_change sets _last_state so
         the next poll doesn't treat a user action as an external change
@@ -493,13 +496,18 @@ class TraySection:
       teardown_window()    → clear window widget refs when panel closes
       setup(tray)          → extra init; call super().setup(tray) first
       on_menu_open()       → called on every menu open
+      FAILURE_STATE        → value read_state() returns on a failed read
+      FAILURE_DEBOUNCE     → consecutive failures required before accepting
     """
 
     poll_interval_ms = None
+    FAILURE_STATE     = None
+    FAILURE_DEBOUNCE  = 2
 
     def __init__(self):
-        self._last_state = None
-        self._tray       = None
+        self._last_state  = None
+        self._tray        = None
+        self._fail_streak = 0
 
     def setup(self, tray):
         self._tray = tray
@@ -512,6 +520,12 @@ class TraySection:
 
     def refresh(self):
         state = self.read_state()
+        if state == self.FAILURE_STATE and self._last_state != self.FAILURE_STATE:
+            self._fail_streak += 1
+            if self._fail_streak < self.FAILURE_DEBOUNCE:
+                return True
+        else:
+            self._fail_streak = 0
         if state != self._last_state:
             if self._last_state is not None:
                 self._schedule_notify(state)
@@ -568,6 +582,8 @@ class BacklightSection(TraySection):
       30 s ACPI read     — catches the auto↔off transition that both read
                            0 in sysfs and so can't be distinguished cheaply
     """
+
+    FAILURE_STATE = 'error'
 
     def __init__(self):
         super().__init__()

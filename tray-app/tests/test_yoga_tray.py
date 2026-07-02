@@ -448,6 +448,29 @@ class TestTraySectionLogic:
         assert sec._last_state == 'balanced'
         assert sec.display_calls == []
 
+    def test_lone_failure_reading_is_ignored(self):
+        sec = _stub(['performance', None, 'performance'])
+        sec.refresh()  # establishes 'performance'
+        sec.refresh()  # lone glitch — should be absorbed
+        sec.refresh()  # recovers to the same value — no-op
+        assert sec.display_calls == ['performance']
+        assert sec._last_state == 'performance'
+
+    def test_sustained_failure_is_accepted_after_debounce(self):
+        sec = _stub(['performance', None, None])
+        sec.refresh()
+        sec.refresh()  # 1st failure — absorbed
+        sec.refresh()  # 2nd consecutive failure — accepted as real
+        assert sec.display_calls == ['performance', None]
+        assert sec._last_state is None
+
+    def test_failure_debounce_does_not_suppress_real_changes(self):
+        sec = _stub(['balanced', 'performance', 'quiet'])
+        sec.refresh()
+        sec.refresh()
+        sec.refresh()
+        assert sec.display_calls == ['balanced', 'performance', 'quiet']
+
 
 # ── KeyBindingsSection._run_key_cmd ──────────────────────────────────────────
 
