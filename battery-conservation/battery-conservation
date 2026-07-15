@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Backend for battery conservation mode (ideapad_acpi driver). Run as root
+# via sudoers NOPASSWD, or invoked by battery-conservation.service at boot.
+#
+# Conservation mode caps charging around 75-80% (per Lenovo's Yoga user guide)
+# to slow battery wear on laptops that stay plugged in most of the time. It
+# does NOT reliably persist across reboots on its own (confirmed via
+# community reports across ideapad models), hence the systemd oneshot
+# service reapplying it at every boot.
+set -euo pipefail
+
+# Symlinked by the ideapad_acpi driver to the real ACPI device path; stable
+# across reboots since it's tied to the driver name, not PCI enumeration order.
+SYSFS=/sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode
+
+case "${1:-}" in
+    get)
+        cat "$SYSFS"
+        ;;
+    set)
+        case "${2:-}" in
+            on|1)  echo 1 > "$SYSFS" ;;
+            off|0) echo 0 > "$SYSFS" ;;
+            *) echo "Usage: battery-conservation set on|off" >&2; exit 1 ;;
+        esac
+        ;;
+    *)
+        echo "Usage: battery-conservation get|set on|off" >&2
+        exit 1
+        ;;
+esac

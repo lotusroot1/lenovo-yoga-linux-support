@@ -8,6 +8,7 @@ Linux support utilities for the Lenovo Yoga 9i Gen 7 (14IAP7) on Linux Mint / Ub
 |---|---|
 | `tray-app/` | Combined system tray app — keyboard backlight, performance profile, refresh rate, and special key bindings |
 | `special-keys/` | Key map reference for the Yoga-specific top-row and function-row keys |
+| `battery-conservation/` | Caps battery charging around 75-80% via `ideapad_acpi` conservation mode, reapplied at every boot — reduces long-term battery wear on machines that stay plugged in |
 
 ## Requirements
 

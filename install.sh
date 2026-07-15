@@ -30,6 +30,11 @@ echo "━━━  Performance Profile  ━━━━━━━━━━━━━━
 "$SCRIPT_DIR/perf-profile/install.sh"
 echo ""
 
+# ── battery conservation ──────────────────────────────────────────────────────
+echo "━━━  Battery Conservation  ━━━━━━━━━━━━━━━━━━━━"
+"$SCRIPT_DIR/battery-conservation/install.sh"
+echo ""
+
 # ── done ──────────────────────────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════╗"
 echo "║   System install complete.                   ║"

@@ -25,4 +25,8 @@ echo "━━━  Performance Profile  ━━━━━━━━━━━━━━
 "$SCRIPT_DIR/perf-profile/uninstall.sh"
 echo ""
 
+echo "━━━  Battery Conservation  ━━━━━━━━━━━━━━━━━━━━"
+"$SCRIPT_DIR/battery-conservation/uninstall.sh"
+echo ""
+
 echo "Done. (Run ./uninstall-tray.sh as your normal user to remove tray apps.)"
