@@ -186,6 +186,50 @@ class TestReadProfile:
         assert yoga_tray.read_profile() is None
 
 
+# ── read_battery_health ───────────────────────────────────────────────────────
+
+class TestReadBatteryHealth:
+    def _write(self, tmp_path, **files):
+        for name, content in files.items():
+            (tmp_path / name).write_text(content)
+        return tmp_path
+
+    def test_reads_energy_based_battery(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            energy_full='64850000\n',
+            energy_full_design='75000000\n',
+            cycle_count='257\n',
+        )
+        monkeypatch.setattr(yoga_tray, 'SYSFS_BATTERY', str(tmp_path))
+        state = yoga_tray.read_battery_health()
+        assert state['unit'] == 'Wh'
+        assert state['full'] == 64.85
+        assert state['design'] == 75.0
+        assert state['health_pct'] == 86.5
+        assert state['cycles'] == 257
+
+    def test_falls_back_to_charge_based_battery(self, tmp_path, monkeypatch):
+        self._write(tmp_path, charge_full='4000000\n', charge_full_design='5000000\n')
+        monkeypatch.setattr(yoga_tray, 'SYSFS_BATTERY', str(tmp_path))
+        state = yoga_tray.read_battery_health()
+        assert state['unit'] == 'Ah'
+        assert state['health_pct'] == 80.0
+
+    def test_missing_cycle_count_is_none(self, tmp_path, monkeypatch):
+        self._write(tmp_path, energy_full='64850000\n', energy_full_design='75000000\n')
+        monkeypatch.setattr(yoga_tray, 'SYSFS_BATTERY', str(tmp_path))
+        assert yoga_tray.read_battery_health()['cycles'] is None
+
+    def test_no_battery_path_returns_none(self, monkeypatch):
+        monkeypatch.setattr(yoga_tray, 'SYSFS_BATTERY', None)
+        assert yoga_tray.read_battery_health() is None
+
+    def test_missing_capacity_files_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(yoga_tray, 'SYSFS_BATTERY', str(tmp_path))
+        assert yoga_tray.read_battery_health() is None
+
+
 # ── is_autostart_enabled / set_autostart ─────────────────────────────────────
 
 class TestAutostart:

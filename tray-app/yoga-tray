@@ -72,6 +72,18 @@ SYSFS_PROFILE = '/sys/firmware/acpi/platform_profile'
 
 SYSFS_CONSERVATION = '/sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode'
 
+def _find_battery_sysfs():
+    base = '/sys/class/power_supply'
+    try:
+        for name in sorted(os.listdir(base)):
+            if name.startswith('BAT'):
+                return os.path.join(base, name)
+    except OSError:
+        pass
+    return None
+
+SYSFS_BATTERY = _find_battery_sysfs()
+
 DEFAULT_ICON = 'input-keyboard'
 TRAY_DESKTOP = os.path.expanduser('~/.config/autostart/yoga-tray.desktop')
 CONFIG_DIR   = os.path.expanduser('~/.config/yoga-tray')
@@ -89,6 +101,7 @@ _TIMING_DEFAULTS = {
     'display_interval_ms':    5000,   # how often to poll display refresh rate
     'backlight_interval_ms':   500,   # how often to check the keyboard backlight brightness
     'conservation_interval_ms': 5000, # how often to check battery conservation mode
+    'battery_health_interval_ms': 60000, # how often to re-read battery wear stats
 }
 
 def _load_timing():
@@ -248,6 +261,45 @@ def set_conservation(state):
         return False
     _, ok = _sudo_run(CONSERVATION_CMD, 'set', state)
     return ok
+
+
+def _read_sysfs_int(path):
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_battery_health():
+    """Wear level from full-charge vs. design capacity, à la coconutBattery.
+
+    Kernels report either energy (µWh) or charge (µAh) depending on the
+    battery's fuel gauge — never both. Design capacity is a fixed value
+    written once at manufacture, so 'full / design' is a stable wear metric
+    even though energy_now/charge_now (current charge) fluctuates constantly.
+    """
+    if not SYSFS_BATTERY:
+        return None
+
+    full   = _read_sysfs_int(os.path.join(SYSFS_BATTERY, 'energy_full'))
+    design = _read_sysfs_int(os.path.join(SYSFS_BATTERY, 'energy_full_design'))
+    unit   = 'Wh'
+    if full is None or design is None:
+        full   = _read_sysfs_int(os.path.join(SYSFS_BATTERY, 'charge_full'))
+        design = _read_sysfs_int(os.path.join(SYSFS_BATTERY, 'charge_full_design'))
+        unit   = 'Ah'
+
+    if not full or not design:
+        return None
+
+    return {
+        'health_pct': round(full / design * 100, 1),
+        'full':       full / 1_000_000,
+        'design':     design / 1_000_000,
+        'unit':       unit,
+        'cycles':     _read_sysfs_int(os.path.join(SYSFS_BATTERY, 'cycle_count')) or None,
+    }
 
 
 def get_refresh_rate():
@@ -640,7 +692,7 @@ class BacklightSection(TraySection):
         for item in self._radio.values():
             item.set_visible(installed)
         status = state if installed else 'not installed'
-        self._header_item.set_label(f'⌨  Backlight: {status}')
+        self._header_item.set_label(f'⌨  Backlight: {status}  ▸')
         if state in self._radio:
             self._updating = True
             self._radio[state].set_active(True)
@@ -657,18 +709,14 @@ class BacklightSection(TraySection):
         return ('Keyboard Backlight', labels.get(state, state), DEFAULT_ICON)
 
     def build_menu_items(self):
-        items = []
-
         self._header_item = Gtk.MenuItem(label='⌨  Backlight: …')
-        self._header_item.set_sensitive(False)
-        items.append(self._header_item)
+
+        submenu = Gtk.Menu()
 
         self._warn_item = Gtk.MenuItem(label='⚠  kbd-backlight not installed — run sudo install.sh')
         self._warn_item.set_sensitive(False)
         self._warn_item.set_no_show_all(True)
-        items.append(self._warn_item)
-
-        items.append(Gtk.SeparatorMenuItem())
+        submenu.append(self._warn_item)
 
         self._radio = {}
         group = None
@@ -677,10 +725,12 @@ class BacklightSection(TraySection):
             if group is None:
                 group = item.get_group()
             item.connect('toggled', self._on_toggled, key)
-            items.append(item)
+            submenu.append(item)
             self._radio[key] = item
 
-        return items
+        submenu.show_all()
+        self._header_item.set_submenu(submenu)
+        return [self._header_item]
 
     def _on_toggled(self, widget, state):
         if not self._updating and widget.get_active():
@@ -751,11 +801,11 @@ class ProfileSection(TraySection):
             item.set_sensitive(installed)
 
         if profile is None:
-            self._header_item.set_label('  Profile: unavailable')
+            self._header_item.set_label('  Profile: unavailable  ▸')
             return
 
         label = PROFILE_LABELS.get(profile, profile or 'unknown')
-        self._header_item.set_label(f'  Profile: {label}')
+        self._header_item.set_label(f'  Profile: {label}  ▸')
 
         if profile in self._radio:
             self._updating = True
@@ -778,20 +828,16 @@ class ProfileSection(TraySection):
         return ('Performance Profile', label, icon)
 
     def build_menu_items(self):
-        items = []
-
         self._header_item = Gtk.MenuItem(label='  Profile: …')
-        self._header_item.set_sensitive(False)
-        items.append(self._header_item)
+
+        submenu = Gtk.Menu()
 
         self._warn_item = Gtk.MenuItem(
             label='⚠  platform-profile not installed — run sudo install.sh'
         )
         self._warn_item.set_sensitive(False)
         self._warn_item.set_no_show_all(True)
-        items.append(self._warn_item)
-
-        items.append(Gtk.SeparatorMenuItem())
+        submenu.append(self._warn_item)
 
         self._radio = {}
         group = None
@@ -800,10 +846,12 @@ class ProfileSection(TraySection):
             if group is None:
                 group = item.get_group()
             item.connect('toggled', self._on_toggled, key)
-            items.append(item)
+            submenu.append(item)
             self._radio[key] = item
 
-        return items
+        submenu.show_all()
+        self._header_item.set_submenu(submenu)
+        return [self._header_item]
 
     def _on_toggled(self, widget, profile):
         if not self._updating and widget.get_active():
@@ -860,11 +908,11 @@ class ConservationSection(TraySection):
         self._check_item.set_sensitive(installed)
 
         if state is None:
-            self._header_item.set_label('  Battery Conservation: unavailable')
+            self._check_item.set_label('  Battery Conservation: unavailable')
             return
 
         label = 'On (~75-80% cap)' if state == 'on' else 'Off'
-        self._header_item.set_label(f'  Battery Conservation: {label}')
+        self._check_item.set_label(f'  Battery Conservation: {label}')
 
         self._updating = True
         self._check_item.set_active(state == 'on')
@@ -884,10 +932,6 @@ class ConservationSection(TraySection):
     def build_menu_items(self):
         items = []
 
-        self._header_item = Gtk.MenuItem(label='  Battery Conservation: …')
-        self._header_item.set_sensitive(False)
-        items.append(self._header_item)
-
         self._warn_item = Gtk.MenuItem(
             label='⚠  battery-conservation not installed — run sudo install.sh'
         )
@@ -895,9 +939,7 @@ class ConservationSection(TraySection):
         self._warn_item.set_no_show_all(True)
         items.append(self._warn_item)
 
-        items.append(Gtk.SeparatorMenuItem())
-
-        self._check_item = Gtk.CheckMenuItem(label='Enabled')
+        self._check_item = Gtk.CheckMenuItem(label='  Battery Conservation: …')
         self._check_item.connect('toggled', self._on_toggled)
         items.append(self._check_item)
 
@@ -928,6 +970,52 @@ class ConservationSection(TraySection):
 
     def teardown_window(self):
         self._win_check = None
+
+
+# ── BatteryHealthSection ──────────────────────────────────────────────────────
+
+class BatteryHealthSection(TraySection):
+    """Read-only battery wear display: full-charge vs. design capacity."""
+
+    def __init__(self):
+        super().__init__()
+        self.poll_interval_ms = TIMING['battery_health_interval_ms']
+        self._win_label       = None
+
+    def read_state(self):
+        return read_battery_health()
+
+    def _format(self, state):
+        if state is None:
+            return '🔋 Battery Health: unavailable'
+        cycles = f", {state['cycles']} cycles" if state['cycles'] else ''
+        return (
+            f"🔋 Battery Health: {state['health_pct']:.0f}%  "
+            f"({state['full']:.1f}/{state['design']:.1f} {state['unit']}{cycles})"
+        )
+
+    def update_display(self, state):
+        text = self._format(state)
+        self._header_item.set_label(text)
+        if self._win_label:
+            self._win_label.set_text(text)
+
+    def build_menu_items(self):
+        self._header_item = Gtk.MenuItem(label='🔋 Battery Health: …')
+        self._header_item.set_sensitive(False)
+        return [self._header_item]
+
+    def build_window_frame(self):
+        frame = Gtk.Frame(label='🔋 Battery Health')
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_border_width(8)
+        frame.add(box)
+        self._win_label = Gtk.Label(label=self._format(self._last_state), xalign=0)
+        box.pack_start(self._win_label, False, False, 0)
+        return frame
+
+    def teardown_window(self):
+        self._win_label = None
 
 
 # ── RefreshRateSection ────────────────────────────────────────────────────────
@@ -1232,25 +1320,25 @@ class KeyBindingsSection(TraySection):
     # ── menu building ─────────────────────────────────────────────────────────
 
     def build_menu_items(self):
-        items = []
+        header = Gtk.MenuItem(label='  Key Bindings  ▸')
 
-        header = Gtk.MenuItem(label='  Key Bindings')
-        header.set_sensitive(False)
-        items.append(header)
+        submenu = Gtk.Menu()
 
         self._evdev_warn_item = Gtk.MenuItem(
             label='⚠  Star/Refresh keys need "input" group — log out and back in'
         )
         self._evdev_warn_item.set_sensitive(False)
         self._evdev_warn_item.set_no_show_all(True)
-        items.append(self._evdev_warn_item)
+        submenu.append(self._evdev_warn_item)
 
         for key_id, display_label, *_ in BINDABLE_KEYS:
             item = Gtk.MenuItem(label=f'{display_label}  […]')
-            items.append(item)
+            submenu.append(item)
             self._key_items[key_id] = item
 
-        return items
+        submenu.show_all()
+        header.set_submenu(submenu)
+        return [header]
 
     # ── window frame ──────────────────────────────────────────────────────────
 
@@ -1352,6 +1440,7 @@ class YogaTray:
             BacklightSection(),
             ProfileSection(),
             ConservationSection(),
+            BatteryHealthSection(),
             RefreshRateSection(),
             KeyBindingsSection(),
         ]

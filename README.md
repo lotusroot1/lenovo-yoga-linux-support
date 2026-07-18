@@ -76,6 +76,16 @@ sudo platform-profile set balanced
 
 > **Note on dmesg errors:** Every performance key press logs `ACPI BIOS Error: Could not resolve symbol [WM00]`. This is a Lenovo BIOS bug — it assumes the Windows WMI handler is always present. The profile still changes correctly through a separate path. The errors are harmless.
 
+### Battery health
+
+Read-only wear indicator, similar to coconutBattery on macOS: full-charge capacity vs. design capacity, plus charge-cycle count, read from `/sys/class/power_supply/BAT*/`. Cinnamon's built-in battery UI only shows current charge percentage, not wear — this fills that gap. Refreshes every 60s (wear changes slowly) and on every menu open.
+
+```bash
+cat /sys/class/power_supply/BAT0/energy_full        # current full-charge capacity (µWh)
+cat /sys/class/power_supply/BAT0/energy_full_design  # original design capacity (µWh)
+cat /sys/class/power_supply/BAT0/cycle_count
+```
+
 ### Display refresh rate
 
 Toggles between 90 Hz and 60 Hz. The built-in display (eDP-1) advertises both rates for the native 2880×1800 resolution in its EDID, so no custom modelines are needed.
