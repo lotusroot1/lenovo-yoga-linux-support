@@ -6,7 +6,7 @@ Linux support utilities for the Lenovo Yoga 9i Gen 7 (14IAP7) on Linux Mint / Ub
 
 | Subfolder | What it does |
 |---|---|
-| `tray-app/` | Combined system tray app — keyboard backlight, performance profile, refresh rate, and special key bindings |
+| `tray-app/` | Combined system tray app — keyboard backlight, performance profile, battery conservation toggle, battery health, refresh rate, and special key bindings |
 | `special-keys/` | Key map reference for the Yoga-specific top-row and function-row keys |
 | `battery-conservation/` | Caps battery charging around 75-80% via `ideapad_acpi` conservation mode, reapplied at every boot — reduces long-term battery wear on machines that stay plugged in |
 
@@ -76,6 +76,15 @@ sudo platform-profile set balanced
 
 > **Note on dmesg errors:** Every performance key press logs `ACPI BIOS Error: Could not resolve symbol [WM00]`. This is a Lenovo BIOS bug — it assumes the Windows WMI handler is always present. The profile still changes correctly through a separate path. The errors are harmless.
 
+### Battery conservation
+
+Toggles charge-cap conservation mode on/off (~75-80% cap) via `ideapad_acpi`, backed by the `battery-conservation/` systemd service so the setting survives reboots.
+
+```bash
+cat /sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode
+sudo battery-conservation set on
+```
+
 ### Battery health
 
 Read-only wear indicator, similar to coconutBattery on macOS: full-charge capacity vs. design capacity, plus charge-cycle count, read from `/sys/class/power_supply/BAT*/`. Cinnamon's built-in battery UI only shows current charge percentage, not wear — this fills that gap. Refreshes every 60s (wear changes slowly) and on every menu open.
@@ -120,14 +129,16 @@ Optional — create `~/.config/yoga-tray/timing.conf` to override defaults:
 
 ```ini
 # How often to check each hardware value (milliseconds)
-performance_interval_ms  = 500
-display_interval_ms      = 5000
-backlight_interval_ms    = 500
+performance_interval_ms    = 500
+display_interval_ms        = 5000
+backlight_interval_ms      = 500
+conservation_interval_ms   = 5000
+battery_health_interval_ms = 60000
 
 # Extra settling time after the slowest check before a notification fires.
 # Effective debounce = max(intervals above) + notification_delay_ms
 # Default: 5000 + 500 = 5500 ms
-notification_delay_ms    = 500
+notification_delay_ms      = 500
 ```
 
 ## Special keys

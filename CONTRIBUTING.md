@@ -95,9 +95,18 @@ If a new key is confirmed via `evtest` (see `special-keys/FINDINGS.md` for how):
 
 - **`_build_menu()`** constructs the static menu skeleton once at startup.
 - **`_on_menu_open()`** is called on every menu open via `GLib.idle_add` and
-  refreshes all dynamic state (backlight, profile, refresh rate, key bindings).
+  refreshes all dynamic state (backlight, profile, conservation, battery
+  health, refresh rate, key bindings).
 - **Polling**: `GLib.timeout_add` drives backlight (500 ms) and profile (500 ms)
-  polls so the icon updates without opening the menu. Refresh rate polls every 3 s.
+  polls so the icon updates without opening the menu. Refresh rate and
+  conservation poll every 5 s; battery health (wear changes slowly) every 60 s.
+- **Compact sections**: a section with more than one selectable state (see
+  `BacklightSection`, `ProfileSection`, `KeyBindingsSection`) should render as
+  a single top-level status row with a `Gtk.Menu` submenu attached via
+  `set_submenu()`, not a flat header + separator + option list — that's what
+  made the context menu too tall before the submenu refactor. A section with
+  only one piece of state (see `ConservationSection`, `BatteryHealthSection`)
+  is a single row with no submenu.
 - **Key binding submenus** are fully rebuilt on each menu open so they always
   show the current Cinnamon binding without requiring a restart.
 - **gsettings helpers** (`_gs_*` functions) call the `gsettings` CLI rather than
