@@ -309,6 +309,75 @@ procedure exists for a sensor bricked this way; vendor tools (Goodix's
 `gdixupdate`, the fwupd Goodix plugin) cover normal signed firmware
 updates, not un-bricking a corrupted/erased state.
 
+## Enrollment/matching is match-on-chip — the real opcodes (static analysis only)
+
+Worth asking up front: does Windows' driver stack (or Windows itself)
+implement the actual fingerprint matching algorithm? No to both. `wbdi.dll`
+literally stands for Windows Biometric Driver Interface — Goodix's
+implementation of Microsoft's generic biometric driver contract. Across all
+the decompiled code traced for this project, there's no ridge-comparison
+logic anywhere in it. These sensors are "match-on-chip": the physical MCU
+inside the sensor stores enrolled templates and runs the matching algorithm
+itself; the host driver is just a thin client that forwards requests and
+relays results.
+
+Found the real enroll/verify opcodes (source `malibuseries/virtualfp.c` in
+`wbdi.dll`, via `command_opcode_callers.txt` — generated last night by a
+different Ghidra pass than the one everything else in this document reads
+from, scoped to a broader command-dispatch trace rather than PSK-only
+strings):
+
+| Opcode | Function | Role |
+|---|---|---|
+| `0xa100` | `_EnrollStart` | Begin an enrollment session |
+| `0xa000` | `_Enroll` | Submit one enrollment sample |
+| `0xa200` | `_CheckForDuplicate` | Check if this finger is already enrolled |
+| `0xa300` | `_CommitTemplate` | Finalize and save the enrolled template |
+| `0xa400` | `_IdentifyFeatureSet` | The actual verify/match operation |
+
+(Also confirmed `0x8000`-`0x8002` = `UpdateFirmware`, source `malibu.c` —
+independent confirmation that range is the dangerous firmware-write
+territory already flagged above, unrelated to enrollment.)
+
+**Practical implication**: a real `libfprint` driver for this chip likely
+won't need to implement fingerprint-matching algorithms at all — just drive
+the sensor's own built-in enroll/verify state machine, the same kind of
+"find the right opcode sequence" problem already solved for image capture.
+
+**Wire format for these (traced, not yet tested live)**: all the framing
+validated live so far assumes a 1-byte opcode. These are native 2-byte
+(`ushort`) opcodes, routed through a different-looking dispatch path
+(`IoHubMcuSendCmd2`). Traced it through `CmdOutCreate` into `_IoHubExec`'s
+`sendCmd` branch and found no separate serialization step — the opcode
+flows through as a raw `ushort` to the same low-level transport function
+pointer used for every other command. Well-grounded conclusion: these
+almost certainly use the *same* framing already validated
+(`command + length + payload + checksum`), just with the command field
+being 2 bytes instead of 1 — not a different protocol, just a wider field.
+
+**Risk of actually testing this (not done)**: lower than the PSK-write/IAP
+path — these are normal runtime operations every Windows Hello enrollment
+already uses, not firmware/bootloader territory. But not risk-free:
+`_Enroll`/`_CommitTemplate` write to persistent template storage that
+almost certainly already holds real enrollments on any machine running
+this — testing could plausibly interact with or overwrite that (a real,
+if far more recoverable, risk than a brick — probably "re-enroll in
+Windows" worst case, not "sensor is dead"). `_IdentifyFeatureSet` is more
+likely read-only/comparison and probably lower-risk, but still unconfirmed
+either way.
+
+Reusable tooling from this: `tools/FindFunctionsByString.java`, a generic
+Ghidra headless script — search defined strings for any substring (source
+file paths, log format strings, etc.) and decompile every function that
+references a match. Not specific to this chip; useful for any "what part
+of this driver actually does X" question against a binary already
+(or freshly) imported into Ghidra. Note if reusing the original Ghidra
+project (`tools/ghidra_project/`, gitignored, not in this repo) on a
+different machine: it may refuse to reopen via headless `-process` mode
+with a `NotOwnerException` if the OS/session identity doesn't match who
+created it — reimporting the target DLL fresh into a new temp project
+sidesteps this cleanly (~40s reanalysis for `wbdi.dll`).
+
 ## What's proven
 
 - PSK capture, TLS-PSK handshake, config upload, sensor arming, image pull,
@@ -321,6 +390,11 @@ updates, not un-bricking a corrupted/erased state.
   against independent ground truth (see above) — even though writing a
   self-chosen PSK to the sensor doesn't currently work, this remains a
   useful, reusable capability for future work on this chip family.
+- The real enrollment/matching opcodes are identified (see above) — not
+  yet tested live, but this removes what looked like the biggest unknown
+  for eventually building a real driver: we now believe no custom matching
+  algorithm needs to be written, just the right commands to the sensor's
+  own on-chip matcher.
 
 ## What's not done
 
@@ -329,10 +403,13 @@ updates, not un-bricking a corrupted/erased state.
 - No finger-detection/wait loop — every capture right now is a single fixed
   request, not "wait for a finger, then capture."
 - `0x36` (FDT_MODE) still completely unexplored.
-- No enrollment or matching logic at all — this only pulls a raw image.
+- Enrollment/matching opcodes are identified but completely untested live —
+  no live enroll, no live verify, and the 2-byte-opcode wire format is a
+  well-grounded hypothesis, not a confirmed one.
 - Not packaged as a `libfprint` driver — that needs a C port following the
   `goodix_tls` driver structure in the community's
-  `goodix-fp-linux-dev/libfprint` fork, plus real enrollment/matching.
+  `goodix-fp-linux-dev/libfprint` fork, plus wiring up the enroll/verify
+  calls above.
 
 ## Credits / prior art
 
@@ -355,6 +432,7 @@ updates, not un-bricking a corrupted/erased state.
 | `tools/goodix_tls_bridge_linux.py` | Standalone TLS-PSK handshake test (needs `dumps/CAPTURED_PSK.txt`) |
 | `tools/capture_fingerprint_linux.py` | Full pipeline: handshake → config → arm → capture → decrypt → decode → z-score correct → save PNGs |
 | `tools/emulate_whitebox.py` | Offline emulator for the sensor's whitebox PSK encryption — computes a valid wrapped PSK for any chosen key, no Windows needed. Needs your own copy of `wbdi.dll` (not included, see script docstring) and `pip install pefile unicorn`. |
+| `tools/FindFunctionsByString.java` | Generic Ghidra headless script — finds and decompiles every function referencing a given string substring in any binary. Not chip-specific; edit `SEARCH_TERMS` at the top. Run via `analyzeHeadless` against a Ghidra project with the target binary imported. |
 
-All scripts expect a `dumps/` folder alongside them (create it yourself,
-it's gitignored) containing your own `CAPTURED_PSK.txt`.
+All Python scripts expect a `dumps/` folder alongside them (create it
+yourself, it's gitignored) containing your own `CAPTURED_PSK.txt`.
