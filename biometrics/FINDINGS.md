@@ -289,6 +289,26 @@ exact erase/IAP-mode command from the decompiled pseudocode *before* any
 live attempt, and worth considering whether the payoff (a self-written PSK,
 when a working captured one already exists) justifies the risk at all.
 
+**This caution is independently confirmed by the wider community, not just
+this project's own guardrails.** `goodix-fp-dump` GitHub issue #61
+documents a real bricking incident — a Goodix sensor (27c6:5125, in a
+Huawei MateBook) rendered unusable during TLS-handshake/protocol
+experimentation, referenced in later issues as a standing cautionary
+example, with no recorded recovery. Separately, a community guide for
+installing an experimental driver for the sibling 55b4 chip
+(gist.github.com/d-k-bo/15e53eab53e2845e97746f5f8661b224) uses the *exact
+same* "type a random confirmation number before running anything
+firmware-adjacent" pattern found in this project's own
+`tools/community/driver_55x4.py`, plus two warnings worth carrying
+forward: don't run flashing scripts automatically/repeatedly (can damage
+the sensor over time), and — relevant here since this laptop dual-boots —
+**leaving the Windows driver enabled means Windows will silently reflash
+the sensor with its own firmware**, which could collide badly with an
+in-progress Linux-side firmware operation. No public, reliable recovery
+procedure exists for a sensor bricked this way; vendor tools (Goodix's
+`gdixupdate`, the fwupd Goodix plugin) cover normal signed firmware
+updates, not un-bricking a corrupted/erased state.
+
 ## What's proven
 
 - PSK capture, TLS-PSK handshake, config upload, sensor arming, image pull,
