@@ -9,6 +9,7 @@ Linux support utilities for the Lenovo Yoga 9i Gen 7 (14IAP7) on Linux Mint / Ub
 | `tray-app/` | Combined system tray app — keyboard backlight, performance profile, battery conservation toggle, battery health, refresh rate, and special key bindings |
 | `special-keys/` | Key map reference for the Yoga-specific top-row and function-row keys |
 | `battery-conservation/` | Caps battery charging around 75-80% via `ideapad_acpi` conservation mode, reapplied at every boot — reduces long-term battery wear on machines that stay plugged in |
+| `biometrics/` | **Research, not installable yet.** Reverse-engineering notes and PoC scripts for the Goodix `27c6:550c` fingerprint sensor (no upstream Linux driver exists) — TLS-PSK protocol cracked and real fingerprint image capture proven working on Linux; not yet packaged as a `libfprint` driver. See `biometrics/FINDINGS.md`. |
 
 ## Requirements
 
@@ -159,6 +160,23 @@ Quick reference — keys handled by the tray or kernel automatically:
 | Mic mute | Cinnamon (`KEY_F20`) |
 | Calculator | Kernel (`KEY_CALC`) |
 | Lock | Kernel (`Super+L`) |
+
+## Biometrics (fingerprint / face unlock)
+
+Not part of the installable tray app — separate, in-progress reverse
+engineering. `fprintd`/`libfprint` report no devices available for this
+laptop's Goodix `27c6:550c` fingerprint sensor by default (no upstream
+Linux driver exists for this exact chip).
+
+See `biometrics/FINDINGS.md` for the full protocol writeup — status as of
+2026-07-21: the sensor's TLS-PSK encryption has been broken (via a
+Windows-side live-memory capture) and real fingerprint images have been
+successfully captured and decoded on Linux, but it's not yet packaged as an
+actual `libfprint` driver (no enrollment/matching, no finger-detect loop).
+
+The onboard Chicony IR camera (`04f2:b758`) is a separate, easier path for
+face unlock via [`howdy`](https://github.com/boltgolt/howdy) — not yet set
+up on this machine, no blockers found so far.
 
 ## Tested on
 

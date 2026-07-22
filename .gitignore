@@ -1,3 +1,4 @@
 .remember/
 *.pyc
 __pycache__/
+biometrics/dumps/
